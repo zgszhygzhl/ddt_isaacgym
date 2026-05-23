@@ -591,8 +591,22 @@ class D1HFlatCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticBarlowTwins'
         runner_class_name = 'OnConstraintPolicyRunner'
         algorithm_class_name = 'NP3O'
-        save_interval = 2000
+        save_interval = 50
         max_iterations = 40000
         num_steps_per_env = 24
+        record_video = True
+        video_interval = 100
+        video_duration = 3.0 #秒
+        video_fps = 30
+        video_num_envs = 16
+        video_tile_rows = 4
+        video_tile_cols = 4
+        video_tile_width = 320
+        video_tile_height = 180
+        video_width = 1280
+        video_height = 720
         resume = False
         resume_path = ''
+
+
+  

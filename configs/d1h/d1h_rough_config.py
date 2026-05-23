@@ -265,18 +265,18 @@ class D1HRough(LeggedRobot):
         if "tracking_lin_vel" not in self.reward_scales:
             if "tracking_lin_vel_x" in self.reward_scales:
                 if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_x"]:
-                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum_x_back, 0.)
-                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum_x)
+                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
+                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
             
             if "tracking_lin_vel_y" in self.reward_scales:
                 if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_y"]:
-                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.5, -self.cfg.commands.max_curriculum_y, 0.)
-                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.5, 0., self.cfg.commands.max_curriculum_y)
+                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.2, -self.cfg.commands.max_curriculum_y, 0.)
+                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.2, 0., self.cfg.commands.max_curriculum_y)
 
         elif "tracking_lin_vel" in self.reward_scales:
             if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
-                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.5, -self.cfg.commands.max_curriculum, 0.)
-                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.5, 0., self.cfg.commands.max_curriculum)
+                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
+                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
 
     #------------ reward functions----------------
     def _reward_tracking_lin_vel_x(self):
@@ -385,17 +385,17 @@ class D1HRoughCfg( LeggedRobotCfg ):
         num_observations = n_proprio + n_scan + history_len*n_proprio + n_priv_latent
         num_actions = 8
     class init_state( LeggedRobotCfg.init_state ):
-        pos = [0.0, 0.0, 0.5] # x,y,z [m]
+        pos = [0.0, 0.0, 0.16] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
         default_joint_angles = {
-            'FL_hip_joint': 0,
-            'FR_hip_joint': 0,
+            'FL_hip_joint': 0.2,
+            'FR_hip_joint': -0.2,
 
-            'FL_thigh_joint': 0.8,
-            'FR_thigh_joint': 0.8,
+            'FL_thigh_joint': 1.3,
+            'FR_thigh_joint': 1.3,
 
-            'FL_calf_joint': -1.5,
-            'FR_calf_joint': -1.5,
+            'FL_calf_joint': -2.75,
+            'FR_calf_joint': -2.75,
 
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
@@ -433,10 +433,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
         global_reference = False
 
         class ranges:
-            lin_vel_x = [-0.8, 0.8]  # min max [m/s]
-            lin_vel_y = [-0.5, 0.5]  # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]  # min max [rad/s]
-            heading = [-3.14, 3.14]
+            lin_vel_x = [-0.1, 0.1]  # min max [m/s]
+            lin_vel_y = [-0.1, 0.1]  # min max [m/s]
+            ang_vel_yaw = [-0.1, 0.1]  # min max [rad/s]
+            heading = [-0.14, 0.14]
 
     class asset( LeggedRobotCfg.asset ):
         file = '{ROOT_DIR}/resources/d1h/urdf/robot.urdf'
@@ -463,19 +463,19 @@ class D1HRoughCfg( LeggedRobotCfg ):
             orientation = -10.0
             ang_vel_xy = -0.10
             dof_acc = -2.5e-7
-            base_height = -20.0
+            base_height = -40.0
             feet_air_time = 0.0
-            collision = -10.0
+            collision = -20.0
             feet_stumble = 0.0
             action_rate = -0.1
-            upward = 1.0
+            upward = 3.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
             body_feet_distance_x = -2.0
             body_feet_distance_y = -5.0
             body_symmetry_y = 0.1
             body_symmetry_z = 0.3
-            collision_hard = -10.0
+            collision_hard = -20.0
         
         only_positive_rewards = False
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
@@ -589,13 +589,18 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticBarlowTwins'
         runner_class_name = 'OnConstraintPolicyRunner'
         algorithm_class_name = 'NP3O'
-        save_interval = 2500
+        save_interval = 50
         max_iterations = 40000
         num_steps_per_env = 24
         record_video = True
-        video_interval = 1000
-        video_duration = 5.0 #秒
+        video_interval = 100
+        video_duration = 3.0 #秒
         video_fps = 30
+        video_num_envs = 16
+        video_tile_rows = 4
+        video_tile_cols = 4
+        video_tile_width = 640
+        video_tile_height = 360
         video_width = 1280
         video_height = 720
         resume = False

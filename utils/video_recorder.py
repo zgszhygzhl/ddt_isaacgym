@@ -44,7 +44,7 @@ class FfmpegVideoWriter:
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
 
     def write(self, frame):
@@ -67,12 +67,8 @@ class FfmpegVideoWriter:
 
         if self.process.stdin is not None:
             self.process.stdin.close()
-        stderr = b""
-        if self.process.stderr is not None:
-            stderr = self.process.stderr.read()
-            self.process.stderr.close()
         return_code = self.process.wait()
         self.process = None
 
         if return_code != 0:
-            raise RuntimeError(stderr.decode("utf-8", errors="ignore") or "ffmpeg exited with a non-zero status")
+            raise RuntimeError("ffmpeg exited with a non-zero status")

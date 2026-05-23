@@ -5,11 +5,11 @@ cd /root/gpufree-data/ddt_rl_isaacgym
 python scripts/train.py \
   --task=d1h_rough \
   --headless \
-  --num_envs 2048 \
-  --max_iterations 200 \
+  --num_envs 4096 \
+  --max_iterations 2000 \
   --resume \
-  --load_run=May22_23-07-16_ \
-  --checkpoint=200 
+  --load_run=May23_16-38-37_ \
+  --checkpoint=15300 
 
 推理 录制
 python scripts/simple_play.py \

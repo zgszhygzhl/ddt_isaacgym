@@ -33,6 +33,7 @@ class OnConstraintPolicyRunner:
         self.policy_cfg = train_cfg["policy"]
         self.device = device
         self.env = env
+        self.current_learning_iteration = 0
 
         # self.phase1_end = self.cfg["phase1_end"] 
  
@@ -45,12 +46,15 @@ class OnConstraintPolicyRunner:
                                                       self.env.num_actions,
                                                       **self.policy_cfg)
         print("Policy architecture: ",actor_critic)
+
+        checkpoint_dict = None
+        resume_path = None
         if self.cfg['resume']:
             log_root = os.path.join(ROOT_DIR, 'logs', self.cfg['experiment_name'], self.cfg['resume_path'])
             resume_path = get_load_path(log_root, load_run=self.cfg['load_run'], checkpoint=self.cfg['checkpoint'])
             print("Resume model from: ",resume_path)
-            model_dict = torch.load(resume_path)
-            actor_critic.load_state_dict(model_dict['model_state_dict'])
+            checkpoint_dict = torch.load(resume_path, map_location=self.device)
+            actor_critic.load_state_dict(checkpoint_dict['model_state_dict'])
         
         actor_critic.to(self.device)
 
@@ -58,6 +62,18 @@ class OnConstraintPolicyRunner:
         self.alg_cfg['k_value'] = self.env.cost_k_values
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        if checkpoint_dict is not None and 'optimizer_state_dict' in checkpoint_dict:
+            self.alg.optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
+
+        if checkpoint_dict is not None:
+            checkpoint_iter = checkpoint_dict.get('iter')
+            path_iter = self._extract_iteration_from_path(resume_path)
+            if checkpoint_iter is None or checkpoint_iter < 0:
+                checkpoint_iter = path_iter
+            elif path_iter > int(checkpoint_iter):
+                checkpoint_iter = path_iter
+            self.current_learning_iteration = int(checkpoint_iter)
+
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.dagger_update_freq = self.alg_cfg["dagger_update_freq"]
@@ -76,47 +92,93 @@ class OnConstraintPolicyRunner:
         self.writer = None
         self.tot_timesteps = 0
         self.tot_time = 0
-        self.current_learning_iteration = 0
 
         self.record_video = self.cfg.get("record_video", False) and self.log_dir is not None
         self.video_interval = int(self.cfg.get("video_interval", 500))
         self.video_duration = float(self.cfg.get("video_duration", 8.0))
         self.video_fps = int(self.cfg.get("video_fps", 30))
-        self.video_width = int(self.cfg.get("video_width", 1280))
-        self.video_height = int(self.cfg.get("video_height", 720))
+        self.video_num_envs = int(self.cfg.get("video_num_envs", 16))
+        self.video_tile_rows = int(self.cfg.get("video_tile_rows", 4))
+        self.video_tile_cols = int(self.cfg.get("video_tile_cols", 4))
+        self.video_tile_width = int(self.cfg.get("video_tile_width", 320))
+        self.video_tile_height = int(self.cfg.get("video_tile_height", 180))
+        self.video_width = self.video_tile_cols * self.video_tile_width
+        self.video_height = self.video_tile_rows * self.video_tile_height
         self.video_dir = None
-        self.video_cam_handle = None
+        self.video_env_ids = []
+        self.video_cam_handles = []
         self.video_writer = None
         self.video_steps_left = 0
         self.video_step_count = 0
         self.video_record_every = max(1, int(1.0 / (self.video_fps * self.env.dt)))
+        self.video_black_tile = np.zeros(
+            (self.video_tile_height, self.video_tile_width, 3),
+            dtype=np.uint8,
+        )
 
         self.env.reset()
         if self.record_video:
             self._setup_train_video_camera()
 
+    def _extract_iteration_from_path(self, checkpoint_path):
+        if checkpoint_path is None:
+            return 0
+
+        filename = os.path.basename(checkpoint_path)
+        stem, _ = os.path.splitext(filename)
+        if '_' not in stem:
+            return 0
+
+        try:
+            return int(stem.rsplit('_', 1)[-1])
+        except ValueError:
+            return 0
+
     def _setup_train_video_camera(self):
+        self.video_env_ids = []
+        self.video_cam_handles = []
         camera_props = gymapi.CameraProperties()
-        camera_props.width = self.video_width
-        camera_props.height = self.video_height
+        camera_props.width = self.video_tile_width
+        camera_props.height = self.video_tile_height
 
-        self.video_cam_handle = self.env.gym.create_camera_sensor(self.env.envs[0], camera_props)
+        max_cameras = min(
+            self.env.num_envs,
+            self.video_num_envs,
+            self.video_tile_rows * self.video_tile_cols,
+        )
+        for env_index in range(max_cameras):
+            env_handle = self.env.envs[env_index]
+            cam_handle = self.env.gym.create_camera_sensor(env_handle, camera_props)
+            self.video_env_ids.append(env_index)
+            self.video_cam_handles.append(cam_handle)
 
-        origin = self.env.env_origins[0].detach().cpu().numpy()
-        cam_pos = gymapi.Vec3(
-            float(origin[0] + 3.0),
-            float(origin[1] - 5.0),
-            float(origin[2] + 2.0),
-        )
-        cam_target = gymapi.Vec3(
-            float(origin[0] + 0.5),
-            float(origin[1] + 0.0),
-            float(origin[2] + 0.5),
-        )
-        self.env.gym.set_camera_location(self.video_cam_handle, self.env.envs[0], cam_pos, cam_target)
+        self._update_train_video_camera_locations()
+
+    def _update_train_video_camera_locations(self):
+        for env_id, cam_handle in zip(self.video_env_ids, self.video_cam_handles):
+            origin = self.env.env_origins[env_id].detach().cpu().numpy()
+            env_handle = self.env.envs[env_id]
+
+            cam_pos = gymapi.Vec3(
+                float(origin[0] + 2.4),
+                float(origin[1] - 3.3),
+                float(origin[2] + 1.55),
+            )
+            cam_target = gymapi.Vec3(
+                float(origin[0] + 0.25),
+                float(origin[1] + 0.0),
+                float(origin[2] + 0.72),
+            )
+
+            self.env.gym.set_camera_location(
+                cam_handle,
+                env_handle,
+                cam_pos,
+                cam_target,
+            )
 
     def _start_train_video(self, iteration):
-        if not self.record_video or self.video_cam_handle is None:
+        if not self.record_video or not self.video_cam_handles:
             return
 
         self._close_train_video()
@@ -132,21 +194,39 @@ class OnConstraintPolicyRunner:
         self.video_step_count = 0
 
     def _capture_train_video_frame(self):
-        if self.video_writer is None or self.video_cam_handle is None:
+        if self.video_writer is None or not self.video_cam_handles:
             return
 
+        self._update_train_video_camera_locations()
         self.env.gym.step_graphics(self.env.sim)
         self.env.gym.render_all_camera_sensors(self.env.sim)
 
         if self.video_step_count % self.video_record_every == 0:
-            image = self.env.gym.get_camera_image(
-                self.env.sim,
-                self.env.envs[0],
-                self.video_cam_handle,
-                gymapi.IMAGE_COLOR,
-            )
-            frame = np.asarray(image, dtype=np.uint8).reshape((self.video_height, self.video_width, 4))[:, :, :3]
-            self.video_writer.write(frame)
+            tiles = []
+            total_tiles = self.video_tile_rows * self.video_tile_cols
+            for env_id, cam_handle in zip(self.video_env_ids, self.video_cam_handles):
+                image = self.env.gym.get_camera_image(
+                    self.env.sim,
+                    self.env.envs[env_id],
+                    cam_handle,
+                    gymapi.IMAGE_COLOR,
+                )
+                frame = np.asarray(image, dtype=np.uint8).reshape(
+                    (self.video_tile_height, self.video_tile_width, 4)
+                )[:, :, :3]
+                tiles.append(frame)
+
+            while len(tiles) < total_tiles:
+                tiles.append(self.video_black_tile)
+
+            rows = []
+            for row_index in range(self.video_tile_rows):
+                row_start = row_index * self.video_tile_cols
+                row_tiles = tiles[row_start:row_start + self.video_tile_cols]
+                rows.append(np.concatenate(row_tiles, axis=1))
+
+            mosaic_frame = np.concatenate(rows, axis=0)
+            self.video_writer.write(mosaic_frame)
 
         self.video_step_count += 1
         self.video_steps_left -= 1
@@ -258,11 +338,14 @@ class OnConstraintPolicyRunner:
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)), iteration=it)
             ep_infos.clear()
 
-        self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        self.current_learning_iteration = tot_iter
+        self.save(
+            os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)),
+            iteration=self.current_learning_iteration,
+        )
         self._close_train_video()
 
     def log(self, locs, width=80, pad=35):
@@ -345,11 +428,14 @@ class OnConstraintPolicyRunner:
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
 
-    def save(self, path, infos=None):
+    def save(self, path, infos=None, iteration=None):
+        if iteration is None:
+            iteration = self.current_learning_iteration
+
         state_dict = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
-            'iter': self.current_learning_iteration,
+            'iter': iteration,
             'infos': infos,
             }
         torch.save(state_dict, path)
