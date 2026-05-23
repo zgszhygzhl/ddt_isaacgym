@@ -1,3 +1,25 @@
+conda activate ddtgym
+cd /root/gpufree-data/ddt_rl_isaacgym
+
+训练
+python scripts/train.py \
+  --task=d1h_rough \
+  --headless \
+  --num_envs 2048 \
+  --max_iterations 200 \
+  --resume \
+  --load_run=Nov28_13-57-46_ \
+  --checkpoint=15000 
+
+推理 录制
+python scripts/simple_play.py --task=d1h_rough_play
+ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
+
+看板
+tensorboard \
+  --logdir logs/d1h_rough \
+  --host 0.0.0.0 \
+  --port 6006
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)

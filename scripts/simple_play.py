@@ -29,7 +29,7 @@ def delete_files_in_directory(directory_path):
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
+    env_cfg.env.num_envs = 6
     # env_cfg.terrain.mesh_type = 'plane'
     # env_cfg.terrain.num_rows = 5
     # env_cfg.terrain.num_cols = 5
@@ -99,24 +99,37 @@ def play(args):
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
 
-    # set rgba camera sensor for debug and doudle check
-    camera_local_transform = gymapi.Transform()
-    camera_local_transform.p = gymapi.Vec3(-0.5, -1, 0.1)
-    camera_local_transform.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(0,0,1), np.deg2rad(90))
+    # set fixed world/environment camera
     camera_props = gymapi.CameraProperties()
-    camera_props.width = 512
-    camera_props.height = 512
+    camera_props.width = 1280
+    camera_props.height = 720
 
     cam_handle = env.gym.create_camera_sensor(env.envs[0], camera_props)
-    body_handle = env.gym.get_actor_rigid_body_handle(env.envs[0], env.actor_handles[0], 0)
-    env.gym.attach_camera_to_body(cam_handle, env.envs[0], body_handle, camera_local_transform, gymapi.FOLLOW_TRANSFORM)
+
+    origin = env.env_origins[0].cpu().numpy()
+
+    cam_pos = gymapi.Vec3(
+      float(origin[0] + 3.0),
+      float(origin[1] - 5.0),
+      float(origin[2] + 2.0),
+    )
+
+    cam_target = gymapi.Vec3(
+      float(origin[0] + 0.5),
+      float(origin[1] + 0.0),
+      float(origin[2] + 0.5),
+    )
+
+    env.gym.set_camera_location(cam_handle, env.envs[0], cam_pos, cam_target)
 
     img_idx = 0
-
-    video_duration = 200
+    video_duration = 10
     num_frames = int(video_duration / env.dt)
     print(f'gathering {num_frames} frames')
+
     video = None
+    record_fps = 30
+    record_every = max(1, int(1.0 / (record_fps * env.dt)))
 
     for i in range(num_frames):
         # env.commands[:,0] = 1.0
@@ -129,12 +142,27 @@ def play(args):
         obs, privileged_obs, rewards,costs,dones, infos = env.step(actions)
         env.gym.step_graphics(env.sim) # required to render in headless mode
         env.gym.render_all_camera_sensors(env.sim)
-        if RECORD_FRAMES:
-            img = env.gym.get_camera_image(env.sim, env.envs[0], cam_handle, gymapi.IMAGE_COLOR).reshape((512,512,4))[:,:,:3]
-            if video is None:
-                video = cv2.VideoWriter('record.mp4', cv2.VideoWriter_fourcc(*'MP4V'), int(1 / env.dt), (img.shape[1],img.shape[0]))
-            video.write(img)
-            img_idx += 1
+        if RECORD_FRAMES and i % record_every == 0:
+          img = env.gym.get_camera_image(
+            env.sim,
+            env.envs[0],
+            cam_handle,
+            gymapi.IMAGE_COLOR,
+          ).reshape((camera_props.height, camera_props.width, 4))[:, :, :3]
+
+          img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+          if video is None:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video = cv2.VideoWriter(
+              'record.mp4',
+              fourcc,
+              record_fps,
+              (img.shape[1], img.shape[0]),
+            )
+
+          video.write(img)
+          img_idx += 1
         if PLOT_STATES:
             if i < stop_state_log and i > start_state_log:
                 logger.log_states(
@@ -167,7 +195,8 @@ def play(args):
             # elif i==stop_rew_log:
             #     logger.print_rewards()
 
-    video.release()
+    if video is not None:
+      video.release()
 
     #test model profile
     # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
