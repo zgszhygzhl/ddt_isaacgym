@@ -8,8 +8,8 @@ python scripts/train.py \
   --num_envs 4096 \
   --max_iterations 2000 \
   --resume \
-  --load_run=May23_16-38-37_ \
-  --checkpoint=15300 
+  --load_run=May23_19-54-33_ \
+  --checkpoint=19200 
 
 推理 录制
 python scripts/simple_play.py \
@@ -23,8 +23,9 @@ ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt
 看板
 tensorboard \
   --logdir logs/d1h_rough \
-  --host 0.0.0.0 \
-  --port 6006
+  --host 127.0.0.1 \
+  --port 6010 \
+  --load_fast=false
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)

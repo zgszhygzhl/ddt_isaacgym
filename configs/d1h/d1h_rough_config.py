@@ -14,6 +14,11 @@ class D1HRough(LeggedRobot):
         super()._init_buffers()
         self.hip_joint_indices = [0, 4]
         self.foot_joint_indices = [3, 7]
+        self.bad_contact_time = torch.zeros(self.num_envs, device=self.device)
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+        self.bad_contact_time[env_ids] = 0
     
     def _create_envs(self):
         """ Creates environments:
@@ -158,18 +163,18 @@ class D1HRough(LeggedRobot):
             self.cfg.init_state.pos
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            self.root_states[env_ids, :2] += torch_rand_float(-1., 1., (len(env_ids), 2), device=self.device) # xy position within 1m of the center
-            self.root_states[env_ids, 2] += torch_rand_float(0., 0.2, (len(env_ids), 1), device=self.device).squeeze(1) # z position within 0.2m of the center
+            self.root_states[env_ids, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), device=self.device) # xy position within 1m of the center
+            self.root_states[env_ids, 2] += torch_rand_float(0.0, 0.2, (len(env_ids), 1), device=self.device).squeeze(1) # z position within 0.2m of the center
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base rotation
-        random_roll = torch_rand_float(-np.pi, np.pi, (len(env_ids),1), device=self.device).squeeze(1)
-        random_pitch = torch_rand_float(-np.pi, np.pi, (len(env_ids),1), device=self.device).squeeze(1)
-        random_yaw = torch_rand_float(-np.pi, np.pi, (len(env_ids),1), device=self.device).squeeze(1)
+        random_roll = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+        random_pitch = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+        random_yaw = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
         self.root_states[env_ids, 3:7] = quat_from_euler_xyz(random_roll, random_pitch, random_yaw)
         # base velocities
-        self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
+        self.root_states[env_ids, 7:13] = torch_rand_float(-0.05, 0.05, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
@@ -179,11 +184,21 @@ class D1HRough(LeggedRobot):
     def check_termination(self):
         """ Check if environments need to be reset
         """
-        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.,
-                                   dim=1)
+        bad_contact = torch.any(
+            torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0,
+            dim=1,
+        )
+        episode_time = self.episode_length_buf.float() * self.dt
+        past_grace_time = episode_time >= self.cfg.env.contact_termination_grace_time
+        self.bad_contact_time = torch.where(
+            bad_contact & past_grace_time,
+            self.bad_contact_time + self.dt,
+            torch.zeros_like(self.bad_contact_time),
+        )
+        self.reset_buf = self.bad_contact_time >= self.cfg.env.contact_termination_duration
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         self.reset_buf |= self.time_out_buf
-        self.reset_buf |= self._get_base_heights() < 0
+        self.reset_buf |= self._get_base_heights() < self.cfg.env.min_base_height_for_reset
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -264,19 +279,19 @@ class D1HRough(LeggedRobot):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if "tracking_lin_vel" not in self.reward_scales:
             if "tracking_lin_vel_x" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_x"]:
-                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
-                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
+                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel_x"]:
+                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.1, -self.cfg.commands.max_curriculum_x_back, 0.)
+                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.1, 0., self.cfg.commands.max_curriculum_x)
             
             if "tracking_lin_vel_y" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_y"]:
-                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.2, -self.cfg.commands.max_curriculum_y, 0.)
-                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.2, 0., self.cfg.commands.max_curriculum_y)
+                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel_y"]:
+                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.1, -self.cfg.commands.max_curriculum_y, 0.)
+                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.1, 0., self.cfg.commands.max_curriculum_y)
 
         elif "tracking_lin_vel" in self.reward_scales:
-            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
-                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
-                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
+            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel"]:
+                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.1, -self.cfg.commands.max_curriculum_x_back, 0.)
+                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.1, 0., self.cfg.commands.max_curriculum_x)
 
     #------------ reward functions----------------
     def _reward_tracking_lin_vel_x(self):
@@ -384,6 +399,9 @@ class D1HRoughCfg( LeggedRobotCfg ):
         history_len = 10
         num_observations = n_proprio + n_scan + history_len*n_proprio + n_priv_latent
         num_actions = 8
+        contact_termination_grace_time = 2.0
+        contact_termination_duration = 0.5
+        min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.16] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
@@ -444,8 +462,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
         name = "d1h"
         penalize_contacts_on = ["thigh", "calf", "base"]
         penalize_contact_head_on = ["base"]
-        terminate_after_contacts_on = []
-        # terminate_after_contacts_on = ["base"]
+        terminate_after_contacts_on = ["base"]
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = False  # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = False
@@ -463,7 +480,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             orientation = -10.0
             ang_vel_xy = -0.10
             dof_acc = -2.5e-7
-            base_height = -40.0
+            base_height = -30.0
             feet_air_time = 0.0
             collision = -20.0
             feet_stumble = 0.0
@@ -475,7 +492,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             body_feet_distance_y = -5.0
             body_symmetry_y = 0.1
             body_symmetry_z = 0.3
-            collision_hard = -20.0
+            collision_hard = -30.0
         
         only_positive_rewards = False
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
