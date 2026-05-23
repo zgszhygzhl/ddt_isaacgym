@@ -12,7 +12,12 @@ python scripts/train.py \
   --checkpoint=200 
 
 推理 录制
-python scripts/simple_play.py --task=d1h_rough_play
+python scripts/simple_play.py \
+  --task=d1h_rough_play \
+  --load_run Nov28_13-57-46_ \
+  --checkpoint 15000 \
+  --headless
+
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
 
 看板

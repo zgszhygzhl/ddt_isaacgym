@@ -594,7 +594,7 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         num_steps_per_env = 24
         record_video = True
         video_interval = 1000
-        video_duration = 300.0
+        video_duration = 5.0 #秒
         video_fps = 30
         video_width = 1280
         video_height = 720
