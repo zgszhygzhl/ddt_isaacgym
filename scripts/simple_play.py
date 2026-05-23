@@ -1,4 +1,3 @@
-import cv2
 import os
 import sys
 # Add the parent directory to the Python path
@@ -12,6 +11,7 @@ from utils.task_registry import task_registry
 import numpy as np
 import torch
 from global_config import ROOT_DIR
+from utils.video_recorder import FfmpegVideoWriter
 
 from PIL import Image as im
 
@@ -150,15 +150,12 @@ def play(args):
             gymapi.IMAGE_COLOR,
           ).reshape((camera_props.height, camera_props.width, 4))[:, :, :3]
 
-          img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
           if video is None:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video = cv2.VideoWriter(
-              'record.mp4',
-              fourcc,
+            video = FfmpegVideoWriter(
+              os.path.join(ROOT_DIR, 'record_h264.mp4'),
+              camera_props.width,
+              camera_props.height,
               record_fps,
-              (img.shape[1], img.shape[0]),
             )
 
           video.write(img)
@@ -196,7 +193,7 @@ def play(args):
             #     logger.print_rewards()
 
     if video is not None:
-      video.release()
+      video.close()
 
     #test model profile
     # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:

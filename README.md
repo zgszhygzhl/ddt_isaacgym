@@ -8,8 +8,8 @@ python scripts/train.py \
   --num_envs 2048 \
   --max_iterations 200 \
   --resume \
-  --load_run=Nov28_13-57-46_ \
-  --checkpoint=15000 
+  --load_run=May22_23-07-16_ \
+  --checkpoint=200 
 
 推理 录制
 python scripts/simple_play.py --task=d1h_rough_play

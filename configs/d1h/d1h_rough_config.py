@@ -592,5 +592,11 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 2500
         max_iterations = 40000
         num_steps_per_env = 24
+        record_video = True
+        video_interval = 1000
+        video_duration = 300.0
+        video_fps = 30
+        video_width = 1280
+        video_height = 720
         resume = False
         resume_path = ''

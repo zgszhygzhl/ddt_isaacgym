@@ -4,8 +4,11 @@ from collections import deque
 import statistics
 import warnings
 
+import numpy as np
+
 from torch.utils.tensorboard import SummaryWriter
 import torch
+from isaacgym import gymapi
 from global_config import ROOT_DIR
 
 # from modules import ActorCriticRMA,ActorCriticRmaTrans,ActorCriticSF,ActorCriticBarlowTwins,ActorCriticStateTransformer,ActorCriticTransBarlowTwins,ActorCriticMixedBarlowTwins,ActorCriticRnnBarlowTwins,ActorCriticVqvae
@@ -15,6 +18,7 @@ from envs.vec_env import VecEnv
 from utils.helpers import hard_phase_schedualer, partial_checkpoint_load
 from copy import copy, deepcopy
 from utils import get_load_path
+from utils.video_recorder import FfmpegVideoWriter
 
 class OnConstraintPolicyRunner:
 
@@ -74,7 +78,93 @@ class OnConstraintPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
 
+        self.record_video = self.cfg.get("record_video", False) and self.log_dir is not None
+        self.video_interval = int(self.cfg.get("video_interval", 500))
+        self.video_duration = float(self.cfg.get("video_duration", 8.0))
+        self.video_fps = int(self.cfg.get("video_fps", 30))
+        self.video_width = int(self.cfg.get("video_width", 1280))
+        self.video_height = int(self.cfg.get("video_height", 720))
+        self.video_dir = None
+        self.video_cam_handle = None
+        self.video_writer = None
+        self.video_steps_left = 0
+        self.video_step_count = 0
+        self.video_record_every = max(1, int(1.0 / (self.video_fps * self.env.dt)))
+
         self.env.reset()
+        if self.record_video:
+            self._setup_train_video_camera()
+
+    def _setup_train_video_camera(self):
+        camera_props = gymapi.CameraProperties()
+        camera_props.width = self.video_width
+        camera_props.height = self.video_height
+
+        self.video_cam_handle = self.env.gym.create_camera_sensor(self.env.envs[0], camera_props)
+
+        origin = self.env.env_origins[0].detach().cpu().numpy()
+        cam_pos = gymapi.Vec3(
+            float(origin[0] + 3.0),
+            float(origin[1] - 5.0),
+            float(origin[2] + 2.0),
+        )
+        cam_target = gymapi.Vec3(
+            float(origin[0] + 0.5),
+            float(origin[1] + 0.0),
+            float(origin[2] + 0.5),
+        )
+        self.env.gym.set_camera_location(self.video_cam_handle, self.env.envs[0], cam_pos, cam_target)
+
+    def _start_train_video(self, iteration):
+        if not self.record_video or self.video_cam_handle is None:
+            return
+
+        self._close_train_video()
+        self.video_dir = os.path.join(self.log_dir, 'videos')
+        video_path = os.path.join(self.video_dir, f'train_iter_{iteration:06d}.mp4')
+        self.video_writer = FfmpegVideoWriter(
+            video_path,
+            self.video_width,
+            self.video_height,
+            self.video_fps,
+        )
+        self.video_steps_left = max(1, int(np.ceil(self.video_duration / self.env.dt)))
+        self.video_step_count = 0
+
+    def _capture_train_video_frame(self):
+        if self.video_writer is None or self.video_cam_handle is None:
+            return
+
+        self.env.gym.step_graphics(self.env.sim)
+        self.env.gym.render_all_camera_sensors(self.env.sim)
+
+        if self.video_step_count % self.video_record_every == 0:
+            image = self.env.gym.get_camera_image(
+                self.env.sim,
+                self.env.envs[0],
+                self.video_cam_handle,
+                gymapi.IMAGE_COLOR,
+            )
+            frame = np.asarray(image, dtype=np.uint8).reshape((self.video_height, self.video_width, 4))[:, :, :3]
+            self.video_writer.write(frame)
+
+        self.video_step_count += 1
+        self.video_steps_left -= 1
+        if self.video_steps_left <= 0:
+            self._close_train_video()
+
+    def _close_train_video(self):
+        if self.video_writer is None:
+            return
+
+        try:
+            self.video_writer.close()
+        except Exception as error:
+            warnings.warn(f'Failed to finalize training video: {error}')
+        finally:
+            self.video_writer = None
+            self.video_steps_left = 0
+            self.video_step_count = 0
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -106,6 +196,9 @@ class OnConstraintPolicyRunner:
             self.alg.actor_critic.imitation_mode()
             
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.record_video and it % self.video_interval == 0:
+                self._start_train_video(it)
+
             # act_teacher_flag = self.act_shed[it]
             # imi_flag = self.imi_shed[it]
             # lag_flag = self.lag_shed[it]
@@ -130,6 +223,7 @@ class OnConstraintPolicyRunner:
                    
                     actions = self.alg.act(obs, critic_obs, infos)
                     obs, privileged_obs, rewards,costs,dones, infos = self.env.step(actions)  # obs has changed to next_obs !! if done obs has been reset
+                    self._capture_train_video_frame()
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs,rewards,costs,dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device),costs.to(self.device),dones.to(self.device)
                     self.alg.process_env_step(rewards,costs,dones, infos)
@@ -169,6 +263,7 @@ class OnConstraintPolicyRunner:
 
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        self._close_train_video()
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
