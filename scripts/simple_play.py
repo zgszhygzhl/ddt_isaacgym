@@ -131,6 +131,25 @@ def play(args):
     record_fps = 30
     record_every = max(1, int(1.0 / (record_fps * env.dt)))
 
+    if RECORD_FRAMES:
+      env.gym.step_graphics(env.sim)
+      env.gym.render_all_camera_sensors(env.sim)
+      img = env.gym.get_camera_image(
+        env.sim,
+        env.envs[0],
+        cam_handle,
+        gymapi.IMAGE_COLOR,
+      ).reshape((camera_props.height, camera_props.width, 4))[:, :, :3]
+
+      video = FfmpegVideoWriter(
+        os.path.join(ROOT_DIR, 'record_h264.mp4'),
+        camera_props.width,
+        camera_props.height,
+        record_fps,
+      )
+      video.write(img)
+      img_idx += 1
+
     for i in range(num_frames):
         # env.commands[:,0] = 1.0
         # env.commands[:,1] = 0
@@ -149,14 +168,6 @@ def play(args):
             cam_handle,
             gymapi.IMAGE_COLOR,
           ).reshape((camera_props.height, camera_props.width, 4))[:, :, :3]
-
-          if video is None:
-            video = FfmpegVideoWriter(
-              os.path.join(ROOT_DIR, 'record_h264.mp4'),
-              camera_props.width,
-              camera_props.height,
-              record_fps,
-            )
 
           video.write(img)
           img_idx += 1

@@ -1,3 +1,7 @@
+5.24
+先把课程学习的升级条件降低
+
+
 conda activate ddtgym
 cd /root/gpufree-data/ddt_rl_isaacgym
 
@@ -6,16 +10,16 @@ python scripts/train.py \
   --task=d1h_rough \
   --headless \
   --num_envs 4096 \
-  --max_iterations 2000 \
+  --max_iterations 1500 \
   --resume \
-  --load_run=May23_19-54-33_ \
-  --checkpoint=19200 
+  --load_run=May23_22-14-52_ \
+  --checkpoint=21200 
 
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_rough_play \
-  --load_run Nov28_13-57-46_ \
-  --checkpoint 15000 \
+  --load_run May23_22-14-52_ \
+  --checkpoint 22700 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4

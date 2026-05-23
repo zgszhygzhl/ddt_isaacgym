@@ -158,23 +158,27 @@ class D1HRough(LeggedRobot):
         Args:
             env_ids (List[int]): Environemnt ids
         """
+        deterministic_reset = getattr(self.cfg.env, "deterministic_reset", False)
         # base position
         if self.custom_origins:
-            self.cfg.init_state.pos
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            self.root_states[env_ids, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), device=self.device) # xy position within 1m of the center
-            self.root_states[env_ids, 2] += torch_rand_float(0.0, 0.2, (len(env_ids), 1), device=self.device).squeeze(1) # z position within 0.2m of the center
+            if not deterministic_reset:
+                self.root_states[env_ids, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), device=self.device)
+                self.root_states[env_ids, 2] += torch_rand_float(0.0, 0.08, (len(env_ids), 1), device=self.device).squeeze(1)
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base rotation
-        random_roll = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
-        random_pitch = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
-        random_yaw = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
-        self.root_states[env_ids, 3:7] = quat_from_euler_xyz(random_roll, random_pitch, random_yaw)
-        # base velocities
-        self.root_states[env_ids, 7:13] = torch_rand_float(-0.05, 0.05, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
+        if deterministic_reset:
+            self.root_states[env_ids, 3:7] = self.base_init_state[3:7]
+            self.root_states[env_ids, 7:13] = 0.0
+        else:
+            random_roll = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+            random_pitch = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+            random_yaw = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+            self.root_states[env_ids, 3:7] = quat_from_euler_xyz(random_roll, random_pitch, random_yaw)
+            self.root_states[env_ids, 7:13] = torch_rand_float(-0.05, 0.05, (len(env_ids), 6), device=self.device)
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
@@ -400,10 +404,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
         num_observations = n_proprio + n_scan + history_len*n_proprio + n_priv_latent
         num_actions = 8
         contact_termination_grace_time = 2.0
-        contact_termination_duration = 0.5
+        contact_termination_duration = 0.2
         min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
-        pos = [0.0, 0.0, 0.16] # x,y,z [m]
+        pos = [0.0, 0.0, 0.35] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
         default_joint_angles = {
             'FL_hip_joint': 0.2,
@@ -482,7 +486,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             dof_acc = -2.5e-7
             base_height = -30.0
             feet_air_time = 0.0
-            collision = -20.0
+            collision = -15.0
             feet_stumble = 0.0
             action_rate = -0.1
             upward = 3.0
@@ -492,7 +496,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             body_feet_distance_y = -5.0
             body_symmetry_y = 0.1
             body_symmetry_z = 0.3
-            collision_hard = -30.0
+            collision_hard = -20.0
         
         only_positive_rewards = False
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
@@ -534,13 +538,28 @@ class D1HRoughCfg( LeggedRobotCfg ):
 class D1HRoughCfg_Play( D1HRoughCfg ):
     class env(D1HRoughCfg.env):
         num_envs = 10
+        deterministic_reset = True
+    class init_state(D1HRoughCfg.init_state):
+        pos = [0.0, 0.0, 0.16]
+        rot = [0, 0.0, 0.0, 1]
+        default_joint_angles = {
+            'FL_hip_joint': 0.2,
+            'FR_hip_joint': -0.2,
+            'FL_thigh_joint': 1.3,
+            'FR_thigh_joint': 1.3,
+            'FL_calf_joint': -2.75,
+            'FR_calf_joint': -2.75,
+            'FL_foot_joint': 0,
+            'FR_foot_joint': 0,
+        }
     class terrain(D1HRoughCfg.terrain):
         mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
-        num_rows = 5
+        num_rows = 1
         num_cols = 5
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         # terrain_proportions = [0, 0, 0, 0, 0, 0, 0]
-        curriculum = False
+        curriculum = True
+        max_init_terrain_level = 0
         # selected = True  # select a unique terrain type and pass all arguments
         # terrain_kwargs = {
         #     "type": "pit_terrain",  
@@ -606,7 +625,7 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticBarlowTwins'
         runner_class_name = 'OnConstraintPolicyRunner'
         algorithm_class_name = 'NP3O'
-        save_interval = 50
+        save_interval = 100
         max_iterations = 40000
         num_steps_per_env = 24
         record_video = True
