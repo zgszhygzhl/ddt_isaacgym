@@ -131,10 +131,10 @@ class Terrain:
 
         env_origin_x = (i + 0.5) * self.env_length
         env_origin_y = (j + 0.5) * self.env_width
-        x1 = int((self.env_length / 2. - 1) / terrain.horizontal_scale)
-        x2 = int((self.env_length / 2. + 1) / terrain.horizontal_scale)
-        y1 = int((self.env_width / 2. - 1) / terrain.horizontal_scale)
-        y2 = int((self.env_width / 2. + 1) / terrain.horizontal_scale)
+        x1 = int((self.env_length / 2. - 0.2) / terrain.horizontal_scale)
+        x2 = int((self.env_length / 2. + 0.2) / terrain.horizontal_scale)
+        y1 = int((self.env_width / 2. - 0.2) / terrain.horizontal_scale)
+        y2 = int((self.env_width / 2. + 0.2) / terrain.horizontal_scale)
         env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2]) * terrain.vertical_scale
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 

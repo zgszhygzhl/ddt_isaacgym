@@ -95,7 +95,6 @@ class D1HRough(LeggedRobot):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
             pos = self.env_origins[i].clone()
-            pos[:2] += torch_rand_float(-1., 1., (2,1), device=self.device).squeeze(1)
             pos[2] += self.base_init_state[2]
             start_pose.p = gymapi.Vec3(*pos)
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
@@ -163,9 +162,6 @@ class D1HRough(LeggedRobot):
         if self.custom_origins:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            if not deterministic_reset:
-                self.root_states[env_ids, :2] += torch_rand_float(-0.5, 0.5, (len(env_ids), 2), device=self.device)
-                self.root_states[env_ids, 2] += torch_rand_float(0.0, 0.08, (len(env_ids), 1), device=self.device).squeeze(1)
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
@@ -174,11 +170,11 @@ class D1HRough(LeggedRobot):
             self.root_states[env_ids, 3:7] = self.base_init_state[3:7]
             self.root_states[env_ids, 7:13] = 0.0
         else:
-            random_roll = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
-            random_pitch = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
-            random_yaw = torch_rand_float(-0.2, 0.2, (len(env_ids),1), device=self.device).squeeze(1)
+            random_roll = torch_rand_float(-0.05, 0.05, (len(env_ids),1), device=self.device).squeeze(1)
+            random_pitch = torch_rand_float(-0.05, 0.05, (len(env_ids),1), device=self.device).squeeze(1)
+            random_yaw = torch_rand_float(-0.05, 0.05, (len(env_ids),1), device=self.device).squeeze(1)
             self.root_states[env_ids, 3:7] = quat_from_euler_xyz(random_roll, random_pitch, random_yaw)
-            self.root_states[env_ids, 7:13] = torch_rand_float(-0.05, 0.05, (len(env_ids), 6), device=self.device)
+            self.root_states[env_ids, 7:13] = torch_rand_float(-0.02, 0.02, (len(env_ids), 6), device=self.device)
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
@@ -407,7 +403,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
         contact_termination_duration = 0.2
         min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
-        pos = [0.0, 0.0, 0.35] # x,y,z [m]
+        pos = [0.0, 0.0, 0.16] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
         default_joint_angles = {
             'FL_hip_joint': 0.2,
@@ -540,7 +536,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         num_envs = 10
         deterministic_reset = True
     class init_state(D1HRoughCfg.init_state):
-        pos = [0.0, 0.0, 0.16]
+        pos = [0.0, 0.0, 0.56]
         rot = [0, 0.0, 0.0, 1]
         default_joint_angles = {
             'FL_hip_joint': 0.2,
