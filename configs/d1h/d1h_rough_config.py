@@ -150,6 +150,34 @@ class D1HRough(LeggedRobot):
         for i in range(len(penalized_contact_head_names)):
             self.penalised_contact_head_index[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], penalized_contact_head_names[i])
 
+    def _reset_dofs(self, env_ids):
+        """Reset DOF states.
+
+        If deterministic_reset=True, use exact default joint angles.
+        Otherwise use small randomization.
+        """
+        deterministic_reset = getattr(self.cfg.env, "deterministic_reset", False)
+
+        if deterministic_reset:
+            self.dof_pos[env_ids] = self.default_dof_pos
+        else:
+            self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(
+                0.9,
+                1.1,
+                (len(env_ids), self.num_dof),
+                device=self.device,
+            )
+
+        self.dof_vel[env_ids] = 0.0
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_dof_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.dof_state),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
     def _reset_root_states(self, env_ids):
         """ Resets ROOT states position and velocities of selected environmments
             Sets base position based on the curriculum
@@ -400,7 +428,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
         num_observations = n_proprio + n_scan + history_len*n_proprio + n_priv_latent
         num_actions = 8
         contact_termination_grace_time = 2.0
-        contact_termination_duration = 0.2
+        contact_termination_duration = 0.1
         min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.16] # x,y,z [m]
@@ -473,9 +501,9 @@ class D1HRoughCfg( LeggedRobotCfg ):
             powers = -2e-5
             termination = -100.0
             tracking_lin_vel = 0.0
-            tracking_lin_vel_x = 20.0
-            tracking_lin_vel_y = 10.0
-            tracking_ang_vel = 5.0
+            tracking_lin_vel_x = 0.0
+            tracking_lin_vel_y = 0.0
+            tracking_ang_vel = 0.0
             lin_vel_z = -5.0
             orientation = -10.0
             ang_vel_xy = -0.10
@@ -519,15 +547,19 @@ class D1HRoughCfg( LeggedRobotCfg ):
             # default_joint = 0.0
 
     class terrain(LeggedRobotCfg.terrain):
-        mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
+        # mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
+        # curriculum = True
+        # measure_heights = True
+        # include_act_obs_pair_buf = False
+        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
+        # terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
+        # slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
+        # step_height = [0.03, 0.17]
+        # slope = [0, 0.6]
+        mesh_type = 'plane'
         curriculum = True
         measure_heights = True
-        include_act_obs_pair_buf = False
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
-        terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
-        slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
-        step_height = [0.03, 0.17]
-        slope = [0, 0.6]
+
 
     class sim(LeggedRobotCfg.sim):
         dt = 0.0025
@@ -536,7 +568,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         num_envs = 10
         deterministic_reset = True
     class init_state(D1HRoughCfg.init_state):
-        pos = [0.0, 0.0, 0.56]
+        pos = [0.0, 0.0, 0.16]
         rot = [0, 0.0, 0.0, 1]
         default_joint_angles = {
             'FL_hip_joint': 0.2,
@@ -549,19 +581,24 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
             'FR_foot_joint': 0,
         }
     class terrain(D1HRoughCfg.terrain):
-        mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
-        num_rows = 1
-        num_cols = 5
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
-        # terrain_proportions = [0, 0, 0, 0, 0, 0, 0]
+        # mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
+        # num_rows = 1
+        # num_cols = 5
+        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
+        # # terrain_proportions = [0, 0, 0, 0, 0, 0, 0]
+        # curriculum = True
+        # max_init_terrain_level = 0
+        # # selected = True  # select a unique terrain type and pass all arguments
+        # # terrain_kwargs = {
+        # #     "type": "pit_terrain",  
+        # #     "depth": 0.5,                     
+        # #     "platform_size": 4.0               
+        # # } # Dict of arguments for selected terrain
+        mesh_type = 'plane'
         curriculum = True
-        max_init_terrain_level = 0
-        # selected = True  # select a unique terrain type and pass all arguments
-        # terrain_kwargs = {
-        #     "type": "pit_terrain",  
-        #     "depth": 0.5,                     
-        #     "platform_size": 4.0               
-        # } # Dict of arguments for selected terrain
+        measure_heights = True
+
+
     class noise( D1HRoughCfg.noise ):
         add_noise = False
     class control ( D1HRoughCfg.control ):
@@ -580,10 +617,14 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
     class commands( D1HRoughCfg.commands ):
         heading_command = True  # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]  # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]  # min max [rad/s]
-            heading = [-3.14, 3.14]
+            # lin_vel_x = [-1.0, 1.0]  # min max [m/s]
+            # lin_vel_y = [-1.0, 1.0]  # min max [m/s]
+            # ang_vel_yaw = [-1.0, 1.0]  # min max [rad/s]
+            # heading = [-3.14, 3.14]
+            lin_vel_x = [-.0,.0]  # min max [m/s]
+            lin_vel_y = [-.0, .0]  # min max [m/s]
+            ang_vel_yaw = [-.0, .0]  # min max [rad/s]
+            heading = [-.04, .04]
             
 class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
@@ -625,7 +666,7 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         max_iterations = 40000
         num_steps_per_env = 24
         record_video = True
-        video_interval = 100
+        video_interval = 500
         video_duration = 3.0 #秒
         video_fps = 30
         video_num_envs = 16

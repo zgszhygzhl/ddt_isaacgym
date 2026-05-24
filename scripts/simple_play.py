@@ -52,6 +52,8 @@ def play(args):
     # env_cfg.domain_rand.randomize_kpkd = False
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    # 强制 reset 一次，让 root state 和 dof state 都按 cfg 初始化
+    env.reset()
     obs = env.get_observations()
     # load policy partial_checkpoint_load
     # train_cfg.runner.resume = True
