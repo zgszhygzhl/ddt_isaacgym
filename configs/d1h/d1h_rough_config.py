@@ -307,19 +307,19 @@ class D1HRough(LeggedRobot):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if "tracking_lin_vel" not in self.reward_scales:
             if "tracking_lin_vel_x" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel_x"]:
-                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.1, -self.cfg.commands.max_curriculum_x_back, 0.)
-                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.1, 0., self.cfg.commands.max_curriculum_x)
+                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_x"]:
+                    self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
+                    self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
             
             if "tracking_lin_vel_y" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel_y"]:
-                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.1, -self.cfg.commands.max_curriculum_y, 0.)
-                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.1, 0., self.cfg.commands.max_curriculum_y)
+                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_y"]:
+                    self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.2, -self.cfg.commands.max_curriculum_y, 0.)
+                    self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.2, 0., self.cfg.commands.max_curriculum_y)
 
         elif "tracking_lin_vel" in self.reward_scales:
-            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.9 * self.reward_scales["tracking_lin_vel"]:
-                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.1, -self.cfg.commands.max_curriculum_x_back, 0.)
-                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.1, 0., self.cfg.commands.max_curriculum_x)
+            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
+                self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2 , -self.cfg.commands.max_curriculum_x_back, 0.)
+                self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
 
     #------------ reward functions----------------
     def _reward_tracking_lin_vel_x(self):
@@ -428,7 +428,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
         num_observations = n_proprio + n_scan + history_len*n_proprio + n_priv_latent
         num_actions = 8
         contact_termination_grace_time = 2.0
-        contact_termination_duration = 0.1
+        contact_termination_duration = 0.01
         min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.16] # x,y,z [m]
@@ -501,15 +501,15 @@ class D1HRoughCfg( LeggedRobotCfg ):
             powers = -2e-5
             termination = -100.0
             tracking_lin_vel = 0.0
-            tracking_lin_vel_x = 0.0
-            tracking_lin_vel_y = 0.0
-            tracking_ang_vel = 0.0
+            tracking_lin_vel_x = 15.0
+            tracking_lin_vel_y = 10.0
+            tracking_ang_vel = 8.0
             lin_vel_z = -5.0
             orientation = -10.0
             ang_vel_xy = -0.10
             dof_acc = -2.5e-7
             base_height = -30.0
-            feet_air_time = 0.0
+            feet_air_time = 8.0
             collision = -15.0
             feet_stumble = 0.0
             action_rate = -0.1

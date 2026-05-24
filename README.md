@@ -12,14 +12,14 @@ python scripts/train.py \
   --num_envs 4096 \
   --max_iterations 5000 \
   --resume \
-  --load_run=May24_15-54-59_ \
-  --checkpoint=2000 
+  --load_run=May24_17-15-23_ \
+  --checkpoint=5500 
 
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_rough_play \
-  --load_run May24_15-54-59_ \
-  --checkpoint 2100 \
+  --load_run May24_18-09-30_ \
+  --checkpoint 8000 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
