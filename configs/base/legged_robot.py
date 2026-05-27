@@ -134,11 +134,16 @@ class LeggedRobot(BaseTask):
         self.feet_heights = 0
 
         # joint positions offsets and PD gains
+        reset_joint_angles = getattr(self.cfg.init_state, "reset_joint_angles", None)
+        if reset_joint_angles is None:
+            reset_joint_angles = self.cfg.init_state.default_joint_angles
         self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+        self.reset_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
         self.hip_joint_indices = [0, 3, 6, 9]
         for i in range(self.num_dofs):
             name = self.dof_names[i]
             self.default_dof_pos[i] = self.cfg.init_state.default_joint_angles[name]
+            self.reset_dof_pos[i] = reset_joint_angles[name]
 
             found = False
             for dof_name in self.cfg.control.stiffness.keys():
@@ -153,6 +158,7 @@ class LeggedRobot(BaseTask):
                     print(f"PD gain of joint {name} were not defined, setting them to zero")
 
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+        self.reset_dof_pos = self.reset_dof_pos.unsqueeze(0)
             
         self.lag_buffer = torch.zeros(self.num_envs,self.cfg.domain_rand.lag_timesteps,self.num_actions,device=self.device,requires_grad=False)
     
@@ -730,7 +736,7 @@ class LeggedRobot(BaseTask):
         Args:
             env_ids (List[int]): Environemnt ids
         """
-        self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(0.9, 1.1, (len(env_ids), self.num_dof), device=self.device)
+        self.dof_pos[env_ids] = self.reset_dof_pos * torch_rand_float(0.9, 1.1, (len(env_ids), self.num_dof), device=self.device)
         self.dof_vel[env_ids] = 0.
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)

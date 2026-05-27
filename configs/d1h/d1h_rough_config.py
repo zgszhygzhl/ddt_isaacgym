@@ -159,9 +159,9 @@ class D1HRough(LeggedRobot):
         deterministic_reset = getattr(self.cfg.env, "deterministic_reset", False)
 
         if deterministic_reset:
-            self.dof_pos[env_ids] = self.default_dof_pos
+            self.dof_pos[env_ids] = self.reset_dof_pos
         else:
-            self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(
+            self.dof_pos[env_ids] = self.reset_dof_pos * torch_rand_float(
                 0.9,
                 1.1,
                 (len(env_ids), self.num_dof),
@@ -433,7 +433,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.16] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
-        default_joint_angles = {
+        reset_joint_angles = {
             'FL_hip_joint': 0.2,
             'FR_hip_joint': -0.2,
 
@@ -442,6 +442,19 @@ class D1HRoughCfg( LeggedRobotCfg ):
 
             'FL_calf_joint': -2.75,
             'FR_calf_joint': -2.75,
+
+            'FL_foot_joint': 0,
+            'FR_foot_joint': 0,
+        }
+        default_joint_angles = {
+            'FL_hip_joint': 0.0,
+            'FR_hip_joint': 0.0,
+
+            'FL_thigh_joint': 0.8,
+            'FR_thigh_joint': 0.8,
+
+            'FL_calf_joint': -1.5,
+            'FR_calf_joint': -1.5,
 
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
@@ -547,18 +560,18 @@ class D1HRoughCfg( LeggedRobotCfg ):
             # default_joint = 0.0
 
     class terrain(LeggedRobotCfg.terrain):
-        # mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
-        # curriculum = True
-        # measure_heights = True
-        # include_act_obs_pair_buf = False
-        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
-        # terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
-        # slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
-        # step_height = [0.03, 0.17]
-        # slope = [0, 0.6]
-        mesh_type = 'plane'
+        mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
         curriculum = True
         measure_heights = True
+        include_act_obs_pair_buf = False
+        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
+        terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
+        slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
+        step_height = [0.03, 0.17]
+        slope = [0, 0.6]
+        # mesh_type = 'plane'
+        # curriculum = True
+        # measure_heights = True
 
 
     class sim(LeggedRobotCfg.sim):
@@ -570,13 +583,23 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
     class init_state(D1HRoughCfg.init_state):
         pos = [0.0, 0.0, 0.16]
         rot = [0, 0.0, 0.0, 1]
-        default_joint_angles = {
+        reset_joint_angles = {
             'FL_hip_joint': 0.2,
             'FR_hip_joint': -0.2,
             'FL_thigh_joint': 1.3,
             'FR_thigh_joint': 1.3,
             'FL_calf_joint': -2.75,
             'FR_calf_joint': -2.75,
+            'FL_foot_joint': 0,
+            'FR_foot_joint': 0,
+        }
+        default_joint_angles = {
+            'FL_hip_joint': 0.0,
+            'FR_hip_joint': 0.0,
+            'FL_thigh_joint': 0.8,
+            'FR_thigh_joint': 0.8,
+            'FL_calf_joint': -1.5,
+            'FR_calf_joint': -1.5,
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
         }

@@ -88,6 +88,7 @@ class LeggedRobotCfg(BaseConfig):
         rot = [0.0, 0.0, 0.0, 1.0]  # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
+        reset_joint_angles = None  # reset posture; falls back to default_joint_angles when unset
         default_joint_angles = {  # target angles when action = 0.0
             "joint_a": 0.,
             "joint_b": 0.}
