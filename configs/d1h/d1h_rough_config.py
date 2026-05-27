@@ -8,6 +8,7 @@ import torch
 from global_config import ROOT_DIR
 from configs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from configs.base.legged_robot import LeggedRobot
+from utils.math import wrap_to_pi
 
 class D1HRough(LeggedRobot):
     def _init_buffers(self):
@@ -15,6 +16,65 @@ class D1HRough(LeggedRobot):
         self.hip_joint_indices = [0, 4]
         self.foot_joint_indices = [3, 7]
         self.bad_contact_time = torch.zeros(self.num_envs, device=self.device)
+
+    def _set_zero_commands(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        self.commands[env_ids, :3] = 0.0
+        if self.cfg.commands.heading_command:
+            _, _, heading = get_euler_xyz(self.base_quat[env_ids])
+            heading = torch.where(heading > torch.pi, heading - 2 * torch.pi, heading)
+            self.commands[env_ids, 3] = heading
+
+    def _resample_commands(self, env_ids):
+        super()._resample_commands(env_ids)
+        if len(env_ids) == 0:
+            return
+
+        zero_ratio = getattr(self.cfg.commands, "zero_command_ratio", 0.0)
+        if zero_ratio > 0.0:
+            zero_mask = torch.rand(len(env_ids), device=self.device) < zero_ratio
+            self._set_zero_commands(env_ids[zero_mask])
+
+        startup_freeze_time = getattr(self.cfg.commands, "startup_freeze_time", 0.0)
+        if startup_freeze_time > 0.0:
+            startup_mask = (self.episode_length_buf[env_ids].float() * self.dt) < startup_freeze_time
+            self._set_zero_commands(env_ids[startup_mask])
+
+    def _post_physics_step_callback(self):
+        resample_interval = int(self.cfg.commands.resampling_time / self.dt)
+        resample_ids = []
+
+        periodic_env_ids = (self.episode_length_buf % resample_interval == 0).nonzero(as_tuple=False).flatten()
+        if len(periodic_env_ids) > 0:
+            resample_ids.append(periodic_env_ids)
+
+        startup_freeze_time = getattr(self.cfg.commands, "startup_freeze_time", 0.0)
+        if startup_freeze_time > 0.0:
+            startup_steps = int(np.ceil(startup_freeze_time / self.dt))
+            startup_release_env_ids = (self.episode_length_buf == startup_steps).nonzero(as_tuple=False).flatten()
+            if len(startup_release_env_ids) > 0:
+                resample_ids.append(startup_release_env_ids)
+
+        if len(resample_ids) > 0:
+            env_ids = torch.unique(torch.cat(resample_ids))
+            self._resample_commands(env_ids)
+
+        if self.cfg.commands.heading_command:
+            forward = quat_apply(self.base_quat, self.forward_vec)
+            heading = torch.atan2(forward[:, 1], forward[:, 0])
+            self.commands[:, 2] = torch.clip(0.5 * wrap_to_pi(self.commands[:, 3] - heading), -1.0, 1.0)
+
+        if self.cfg.terrain.measure_heights:
+            self.measured_heights = self._get_heights()
+            self.feet_heights = self._get_feet_heights()
+            self.feet_body_frame_height = self._get_feet_local_heights()
+
+        if self.cfg.domain_rand.push_robots and (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
+            self._push_robots()
+
+        if self.cfg.domain_rand.disturbance and (self.common_step_counter % self.cfg.domain_rand.disturbance_interval == 0):
+            self._disturbance_robots()
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
@@ -342,6 +402,23 @@ class D1HRough(LeggedRobot):
         tracking_sigma = self.cfg.rewards.tracking_sigma * (0.1+torch.abs(self.commands[:, 2]))/(0.25+torch.abs(self.commands[:, 2]))
         return torch.clamp(-self.projected_gravity[:,2],0,1)*torch.exp(-ang_vel_error/tracking_sigma)
 
+    def _reward_stand_still(self):
+        zero_lin_cmd = torch.norm(self.commands[:, :2], dim=1) < self.cfg.commands.zero_lin_vel_threshold
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * zero_lin_cmd
+
+    def _reward_zero_base_vel(self):
+        zero_lin_cmd = torch.norm(self.commands[:, :2], dim=1) < self.cfg.commands.zero_lin_vel_threshold
+        return torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1) * zero_lin_cmd
+
+    def _reward_zero_wheel_vel(self):
+        zero_lin_cmd = torch.norm(self.commands[:, :2], dim=1) < self.cfg.commands.zero_lin_vel_threshold
+        return torch.sum(torch.square(self.dof_vel[:, self.foot_joint_indices]), dim=1) * zero_lin_cmd
+
+    def _reward_zero_yaw_rate(self):
+        zero_lin_cmd = torch.norm(self.commands[:, :2], dim=1) < self.cfg.commands.zero_lin_vel_threshold
+        zero_yaw_cmd = torch.abs(self.commands[:, 2]) < self.cfg.commands.zero_yaw_threshold
+        return torch.square(self.base_ang_vel[:, 2]) * (zero_lin_cmd & zero_yaw_cmd)
+
     def _reward_upward(self):
         return 1 - torch.clamp(self.projected_gravity[:,2], -1, 1)
 
@@ -490,6 +567,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
         resampling_time = 10.  # time before command are changed[s]
         heading_command = True  # if true: compute ang vel command from heading error
         global_reference = False
+        zero_command_ratio = 0.3
+        zero_lin_vel_threshold = 0.05
+        zero_yaw_threshold = 0.05
+        startup_freeze_time = 1.0
 
         class ranges:
             lin_vel_x = [-0.1, 0.1]  # min max [m/s]
@@ -514,7 +595,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             powers = -2e-5
             termination = -100.0
             tracking_lin_vel = 0.0
-            tracking_lin_vel_x = 15.0
+            tracking_lin_vel_x = 20.0
             tracking_lin_vel_y = 10.0
             tracking_ang_vel = 8.0
             lin_vel_z = -5.0
@@ -526,6 +607,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
             collision = -15.0
             feet_stumble = 0.0
             action_rate = -0.1
+            stand_still = -2.0
+            zero_base_vel = -8.0
+            zero_wheel_vel = -0.2
+            zero_yaw_rate = -2.0
             upward = 3.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
@@ -560,18 +645,18 @@ class D1HRoughCfg( LeggedRobotCfg ):
             # default_joint = 0.0
 
     class terrain(LeggedRobotCfg.terrain):
-        mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
-        curriculum = True
-        measure_heights = True
-        include_act_obs_pair_buf = False
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
-        terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
-        slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
-        step_height = [0.03, 0.17]
-        slope = [0, 0.6]
-        # mesh_type = 'plane'
+        # mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
         # curriculum = True
         # measure_heights = True
+        # include_act_obs_pair_buf = False
+        # # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
+        # terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
+        # slope_treshold = 1.0  # slopes above this threshold will be corrected to vertical surfaces
+        # step_height = [0.03, 0.17]
+        # slope = [0, 0.6]
+        mesh_type = 'plane'
+        curriculum = True
+        measure_heights = True
 
 
     class sim(LeggedRobotCfg.sim):
