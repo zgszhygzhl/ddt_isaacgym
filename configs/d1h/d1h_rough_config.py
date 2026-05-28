@@ -607,10 +607,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
             collision = -15.0
             feet_stumble = 0.0
             action_rate = -0.1
-            stand_still = -2.0
-            zero_base_vel = -8.0
-            zero_wheel_vel = -0.2
-            zero_yaw_rate = -2.0
+            stand_still = -3.0
+            zero_base_vel = -16.0
+            zero_wheel_vel = -0.05
+            zero_yaw_rate = -5.0
             upward = 3.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
@@ -621,7 +621,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             collision_hard = -20.0
         
         only_positive_rewards = False
-        tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.2  # tracking reward = exp(-error^2/sigma)
         distance_sigma = 0.1  # distance reward = exp(-distance^2/sigma)
         soft_dof_pos_limit = 0.9  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 0.9
@@ -725,14 +725,14 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
     class commands( D1HRoughCfg.commands ):
         heading_command = True  # if true: compute ang vel command from heading error
         class ranges:
-            # lin_vel_x = [-1.0, 1.0]  # min max [m/s]
-            # lin_vel_y = [-1.0, 1.0]  # min max [m/s]
-            # ang_vel_yaw = [-1.0, 1.0]  # min max [rad/s]
-            # heading = [-3.14, 3.14]
-            lin_vel_x = [-.0,.0]  # min max [m/s]
-            lin_vel_y = [-.0, .0]  # min max [m/s]
-            ang_vel_yaw = [-.0, .0]  # min max [rad/s]
-            heading = [-.04, .04]
+            lin_vel_x = [1.0, 1.0]  # min max [m/s]
+            lin_vel_y = [-1.0, 1.0]  # min max [m/s]
+            ang_vel_yaw = [-1.0, 1.0]  # min max [rad/s]
+            heading = [-3.14, 3.14]
+            # lin_vel_x = [-.0,.0]  # min max [m/s]
+            # lin_vel_y = [-.0, .0]  # min max [m/s]
+            # ang_vel_yaw = [-.0, .0]  # min max [rad/s]
+            # heading = [-.0, .0]
             
 class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
