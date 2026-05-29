@@ -124,7 +124,7 @@ def play(args):
     env.gym.set_camera_location(cam_handle, env.envs[0], cam_pos, cam_target)
 
     img_idx = 0
-    video_duration = 10
+    video_duration = 20
     num_frames = int(video_duration / env.dt)
     start_state_log = 0
     stop_state_log = num_frames

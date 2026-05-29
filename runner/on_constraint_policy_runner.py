@@ -146,13 +146,126 @@ class OnConstraintPolicyRunner:
             self.video_num_envs,
             self.video_tile_rows * self.video_tile_cols,
         )
-        for env_index in range(max_cameras):
+        selected_env_ids = self._select_train_video_env_ids(max_cameras)
+        for env_index in selected_env_ids:
             env_handle = self.env.envs[env_index]
             cam_handle = self.env.gym.create_camera_sensor(env_handle, camera_props)
             self.video_env_ids.append(env_index)
             self.video_cam_handles.append(cam_handle)
 
         self._update_train_video_camera_locations()
+
+    def _select_train_video_env_ids(self, max_cameras):
+        if max_cameras <= 0:
+            return []
+
+        terrain_types = getattr(self.env, "terrain_types", None)
+        terrain_cfg = getattr(getattr(self.env, "cfg", None), "terrain", None)
+        if terrain_types is None or terrain_cfg is None:
+            return list(range(max_cameras))
+
+        num_cols = int(getattr(terrain_cfg, "num_cols", 0))
+        terrain_proportions = list(getattr(terrain_cfg, "terrain_proportions", []))
+        if num_cols <= 0 or not terrain_proportions:
+            return list(range(max_cameras))
+
+        terrain_type_values = terrain_types.detach().cpu().tolist()
+        terrain_type_to_env_ids = {}
+        for env_index, terrain_type in enumerate(terrain_type_values):
+            terrain_type_to_env_ids.setdefault(int(terrain_type), []).append(env_index)
+
+        category_to_cols = {
+            "smooth_slope": [],
+            "rough_slope": [],
+            "stairs_up": [],
+            "stairs_down": [],
+            "discrete": [],
+            "stepping_stones": [],
+            "gap": [],
+            "pit": [],
+        }
+        cumulative = np.cumsum(np.asarray(terrain_proportions, dtype=np.float64))
+        for col_index in range(num_cols):
+            choice = col_index / num_cols + 0.001
+            if choice < cumulative[0]:
+                category_to_cols["smooth_slope"].append(col_index)
+            elif len(cumulative) > 1 and choice < cumulative[1]:
+                category_to_cols["rough_slope"].append(col_index)
+            elif len(cumulative) > 3 and choice < cumulative[3]:
+                if choice < cumulative[2]:
+                    category_to_cols["stairs_up"].append(col_index)
+                else:
+                    category_to_cols["stairs_down"].append(col_index)
+            elif len(cumulative) > 4 and choice < cumulative[4]:
+                category_to_cols["discrete"].append(col_index)
+            elif len(cumulative) > 5 and choice < cumulative[5]:
+                category_to_cols["stepping_stones"].append(col_index)
+            elif len(cumulative) > 6 and choice < cumulative[6]:
+                category_to_cols["gap"].append(col_index)
+            else:
+                category_to_cols["pit"].append(col_index)
+
+        selected_env_ids = []
+        used_cols = set()
+        primary_categories = [
+            "stairs_up",
+            "stairs_down",
+            "smooth_slope",
+            "rough_slope",
+            "discrete",
+            "stepping_stones",
+            "gap",
+            "pit",
+        ]
+
+        for category in primary_categories:
+            for col_index in category_to_cols[category]:
+                env_ids = terrain_type_to_env_ids.get(col_index)
+                if env_ids:
+                    selected_env_ids.append(env_ids[0])
+                    used_cols.add(col_index)
+                    break
+            if len(selected_env_ids) >= max_cameras:
+                return selected_env_ids[:max_cameras]
+
+        refill_categories = [
+            "stairs_up",
+            "stairs_down",
+            "rough_slope",
+            "smooth_slope",
+            "discrete",
+            "stepping_stones",
+            "gap",
+            "pit",
+        ]
+        made_progress = True
+        while len(selected_env_ids) < max_cameras and made_progress:
+            made_progress = False
+            for category in refill_categories:
+                for col_index in category_to_cols[category]:
+                    if col_index in used_cols:
+                        continue
+                    env_ids = terrain_type_to_env_ids.get(col_index)
+                    if not env_ids:
+                        continue
+                    selected_env_ids.append(env_ids[0])
+                    used_cols.add(col_index)
+                    made_progress = True
+                    break
+                if len(selected_env_ids) >= max_cameras:
+                    break
+
+        if len(selected_env_ids) < max_cameras:
+            selected_set = set(selected_env_ids)
+            for env_index in range(self.env.num_envs):
+                if env_index in selected_set:
+                    continue
+                selected_env_ids.append(env_index)
+                selected_set.add(env_index)
+                if len(selected_env_ids) >= max_cameras:
+                    break
+
+        return selected_env_ids[:max_cameras]
 
     def _update_train_video_camera_locations(self):
         for env_id, cam_handle in zip(self.video_env_ids, self.video_cam_handles):
