@@ -597,7 +597,7 @@ class D1HRoughCfg( LeggedRobotCfg ):
             tracking_lin_vel = 0.0
             tracking_lin_vel_x = 25.0
             tracking_lin_vel_y = 12.0
-            tracking_ang_vel = 17.0
+            tracking_ang_vel = 19.0
             lin_vel_z = -5.0
             orientation = -10.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
             ang_vel_xy = -0.10   #x、y 轴角速度的平方和，惩罚前后翻、左右晃的角速度
@@ -696,7 +696,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         curriculum = True
         max_init_terrain_level = 0
         selected = False
-        terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
+        terrain_proportions = [0.0, 0.0, 0.0, 0.0, 1.0]
         slope_treshold = 0.2
         step_height = [0.14, 0.14]
         step_width = 0.35
