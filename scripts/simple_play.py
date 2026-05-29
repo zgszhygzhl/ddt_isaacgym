@@ -4,9 +4,11 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from configs import *
 from isaacgym import gymapi
+from isaacgym.torch_utils import get_euler_xyz
 from modules import *
 from utils import  get_args, export_policy_as_jit, task_registry, Logger, get_load_path
 from utils.helpers import class_to_dict
+from utils.math import wrap_to_pi
 from utils.task_registry import task_registry
 import numpy as np
 import torch
@@ -162,6 +164,9 @@ def play(args):
         # actions = torch.clamp(actions,-1.2,1.2)
         # actions = policy(obs.detach())
         obs, privileged_obs, rewards,costs,dones, infos = env.step(actions)
+        _, _, base_heading = get_euler_xyz(env.base_quat[robot_index : robot_index + 1])
+        actual_heading = wrap_to_pi(base_heading)[0].item()
+        command_heading = env.commands[robot_index, 3].item() if env.commands.shape[1] > 3 else 0.0
         if i % status_every == 0:
           print(
             f"step={i:04d} "
@@ -170,7 +175,8 @@ def play(args):
             f"{env.commands[robot_index, 2].item():+.3f}) "
             f"actual[x,y,yaw]=({env.base_lin_vel[robot_index, 0].item():+.3f}, "
             f"{env.base_lin_vel[robot_index, 1].item():+.3f}, "
-            f"{env.base_ang_vel[robot_index, 2].item():+.3f})"
+            f"{env.base_ang_vel[robot_index, 2].item():+.3f}) "
+            f"heading(cmd,actual)=({command_heading:+.3f}, {actual_heading:+.3f})"
           )
         env.gym.step_graphics(env.sim) # required to render in headless mode
         env.gym.render_all_camera_sensors(env.sim)
@@ -195,10 +201,12 @@ def play(args):
                         'command_x': env.commands[robot_index, 0].item(),
                         'command_y': env.commands[robot_index, 1].item(),
                         'command_yaw': env.commands[robot_index, 2].item(),
+                        'command_heading': command_heading,
                         'base_vel_x': env.base_lin_vel[robot_index, 0].item(),
                         'base_vel_y': env.base_lin_vel[robot_index, 1].item(),
                         'base_vel_z': env.base_lin_vel[robot_index, 2].item(),
                         'base_vel_yaw': env.base_ang_vel[robot_index, 2].item(),
+                        'base_heading': actual_heading,
                         'contact_forces_z': env.contact_forces[robot_index, env.feet_indices, 2].cpu().numpy(),
                         'base_height': env._get_base_heights()[robot_index].item(),
                         'command_height': env.cfg.rewards.base_height_target,

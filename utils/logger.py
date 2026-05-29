@@ -97,18 +97,13 @@ class Logger:
         a.set(xlabel="time [s]", ylabel="base ang vel [rad/s]", title="Base Velocity Yaw")
 
         a = axs[1, 0]
-        if log["dof_pos"]:
-            append_handle(main_handles, a.plot(time, log["dof_pos"], label="actual joint pos")[0])
-        if log["dof_pos_target"]:
-            append_handle(main_handles, a.plot(time, log["dof_pos_target"], label="target joint pos")[0])
-        a.set(xlabel="time [s]", ylabel="position [rad]", title=f"Joint Position: {logged_joint_name}")
+        if log["base_heading"]:
+            append_handle(main_handles, a.plot(time, log["base_heading"], label="actual heading")[0])
+        if log["command_heading"]:
+            append_handle(main_handles, a.plot(time, log["command_heading"], label="commanded heading")[0])
+        a.set(xlabel="time [s]", ylabel="heading [rad]", title="Base Heading")
 
-        a = axs[1, 1]
-        if log["dof_vel"]:
-            append_handle(main_handles, a.plot(time, log["dof_vel"], label="actual joint vel")[0])
-        if log["dof_vel_target"]:
-            append_handle(main_handles, a.plot(time, log["dof_vel_target"], label="target joint vel")[0])
-        a.set(xlabel="time [s]", ylabel="velocity [rad/s]", title=f"Joint Velocity: {logged_joint_name}")
+        axs[1, 1].axis("off")
 
         a = axs[1, 2]
         if log["base_vel_z"]:

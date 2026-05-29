@@ -84,6 +84,7 @@ class Terrain:
 
         slope = self.cfg.slope[0] + (self.cfg.slope[1] - self.cfg.slope[0]) * difficulty
         step_height = self.cfg.step_height[0] + (self.cfg.step_height[1] - self.cfg.step_height[0]) * difficulty
+        step_width = np.random.uniform(self.cfg.step_width_range[0], self.cfg.step_width_range[1])
         discrete_obstacles_height = self.cfg.discrete_obstacles_height[0] + (self.cfg.discrete_obstacles_height[1] - self.cfg.discrete_obstacles_height[0]) * difficulty
 
         stepping_stones_size = 1.5 * (1.05 - difficulty)
@@ -101,7 +102,7 @@ class Terrain:
         elif choice < self.proportions[3]:
             if choice < self.proportions[2]:
                 step_height *= -1
-            terrain_utils.pyramid_stairs_terrain(terrain, step_width=self.cfg.step_width, step_height=step_height,
+            terrain_utils.pyramid_stairs_terrain(terrain, step_width=step_width, step_height=step_height,
                                                     platform_size=3.)
         elif choice < self.proportions[4]:
             num_rectangles = 20

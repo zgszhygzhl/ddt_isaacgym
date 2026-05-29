@@ -67,6 +67,7 @@ class LeggedRobotCfg(BaseConfig):
         slope = [0, 0.4]
         step_height = [0.05, 0.23]
         step_width = 0.31
+        step_width_range = [0.31, 0.31]
         discrete_obstacles_height = [0.05, 0.25]
         pit_depth = [0.1, 1.0]
     class commands:
