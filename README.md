@@ -10,16 +10,16 @@ python scripts/train.py \
   --task=d1h_rough \
   --headless \
   --num_envs 4096 \
-  --max_iterations 4000 \
+  --max_iterations 15000 \
   --resume \
-  --load_run May27_18-40-42_ \
-  --checkpoint 17500
+  --load_run May28_16-42-45_ \
+  --checkpoint 38800
 
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_rough_play \
-  --load_run May28_10-39-11_ \
-  --checkpoint 20800 \
+  --load_run May28_16-42-45_ \
+  --checkpoint 38800 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
@@ -29,6 +29,11 @@ tensorboard \
   --logdir logs/d1h_rough \
   --host 0.0.0.0 \
   --port 6006
+
+tmux
+tmux new -s d1h_train
+tmux ls
+tmux attach -t d1h_train
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)

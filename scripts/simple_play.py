@@ -95,9 +95,6 @@ def play(args):
     logger = Logger(env.dt)
     robot_index = 0 # which robot is used for logging
     joint_index = 1 # which joint is used for logging
-    start_state_log = 1000 # number of steps before plotting states
-
-    stop_state_log = 2000 # number of steps before plotting states
     stop_rew_log = env.max_episode_length + 1 # number of steps before print average episode rewards
 
 
@@ -127,11 +124,15 @@ def play(args):
     img_idx = 0
     video_duration = 10
     num_frames = int(video_duration / env.dt)
+    start_state_log = 0
+    stop_state_log = num_frames
     print(f'gathering {num_frames} frames')
 
     video = None
     record_fps = 30
     record_every = max(1, int(1.0 / (record_fps * env.dt)))
+    status_every = max(1, int(1.0 / env.dt))
+    velocity_plot_path = os.path.join(ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'velocity_tracking.png')
 
     if RECORD_FRAMES:
       env.gym.step_graphics(env.sim)
@@ -161,6 +162,16 @@ def play(args):
         # actions = torch.clamp(actions,-1.2,1.2)
         # actions = policy(obs.detach())
         obs, privileged_obs, rewards,costs,dones, infos = env.step(actions)
+        if i % status_every == 0:
+          print(
+            f"step={i:04d} "
+            f"cmd[x,y,yaw]=({env.commands[robot_index, 0].item():+.3f}, "
+            f"{env.commands[robot_index, 1].item():+.3f}, "
+            f"{env.commands[robot_index, 2].item():+.3f}) "
+            f"actual[x,y,yaw]=({env.base_lin_vel[robot_index, 0].item():+.3f}, "
+            f"{env.base_lin_vel[robot_index, 1].item():+.3f}, "
+            f"{env.base_ang_vel[robot_index, 2].item():+.3f})"
+          )
         env.gym.step_graphics(env.sim) # required to render in headless mode
         env.gym.render_all_camera_sensors(env.sim)
         if RECORD_FRAMES and i % record_every == 0:
@@ -174,7 +185,7 @@ def play(args):
           video.write(img)
           img_idx += 1
         if PLOT_STATES:
-            if i < stop_state_log and i > start_state_log:
+          if start_state_log <= i < stop_state_log:
                 logger.log_states(
                     {
                         'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
@@ -195,8 +206,6 @@ def play(args):
                         'velocities': env.dof_vel[robot_index, :].tolist(),
                     }
                 )
-            elif i==stop_state_log:
-                logger.plot_states()
             # if  0 < i < stop_rew_log:
             #     if infos["episode"]:
             #         num_episodes = torch.sum(env.reset_buf).item()
@@ -207,6 +216,14 @@ def play(args):
 
     if video is not None:
       video.close()
+
+    if PLOT_STATES:
+      plot_metadata = {
+        'joint_names': list(getattr(env, 'dof_names', [])),
+        'logged_joint_name': getattr(env, 'dof_names', [f'joint_{joint_index}'])[joint_index],
+      }
+      logger.plot_states(save_path=velocity_plot_path, show=False, plot_metadata=plot_metadata)
+      print(f'velocity plot saved to {velocity_plot_path}')
 
     #test model profile
     # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:

@@ -1,9 +1,10 @@
 
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
-from multiprocessing import Process, Value
+from multiprocessing import Process
 
 
 class Logger:
@@ -31,101 +32,170 @@ class Logger:
         self.state_log.clear()
         self.rew_log.clear()
 
-    def plot_states(self):
-        self.plot_process = Process(target=self._plot)
+    def plot_states(self, save_path=None, show=True, plot_metadata=None):
+        if save_path is not None or not show:
+            self._plot(save_path=save_path, show=show, plot_metadata=plot_metadata)
+            return
+
+        self.plot_process = Process(target=self._plot, kwargs={"plot_metadata": plot_metadata})
         self.plot_process.start()
 
-    def _plot(self):
-        nb_rows = 3
-        nb_cols = 3
-        fig, axs = plt.subplots(nb_rows, nb_cols)
-        for key, value in self.state_log.items():
-            time = np.linspace(0, len(value) * self.dt, len(value))
-            break
+    def _plot(self, save_path=None, show=True, plot_metadata=None):
+        if not self.state_log:
+            return
+
+        plot_metadata = plot_metadata or {}
+        joint_names = plot_metadata.get("joint_names", [])
+        logged_joint_name = plot_metadata.get("logged_joint_name", "tracked_joint")
+        contact_names = plot_metadata.get("contact_names", [])
+
         log = self.state_log
-        # plot joint targets and measured positions
-        a = axs[1, 0]
-        if log["dof_pos"]: a.plot(time, log["dof_pos"], label='measured')
-        if log["dof_pos_target"]: a.plot(time, log["dof_pos_target"], label='target')
-        a.set(xlabel='time [s]', ylabel='Position [rad]', title='DOF Position')
-        a.legend()
-        # plot joint velocity
-        a = axs[1, 1]
-        if log["dof_vel"]: a.plot(time, log["dof_vel"], label='measured')
-        if log["dof_vel_target"]: a.plot(time, log["dof_vel_target"], label='target')
-        a.set(xlabel='time [s]', ylabel='Velocity [rad/s]', title='Joint Velocity')
-        a.legend()
-        # plot base vel x
+        time = None
+        for _, value in log.items():
+            if value:
+                time = np.arange(len(value)) * self.dt
+                break
+        if time is None:
+            return
+
+        def append_handle(handle_list, line):
+            if line is not None:
+                handle_list.append(line)
+
+        def dedup_handles(handles):
+            unique_handles = []
+            seen_labels = set()
+            for handle in handles:
+                label = handle.get_label()
+                if label not in seen_labels:
+                    unique_handles.append(handle)
+                    seen_labels.add(label)
+            return unique_handles
+
+        fig, axs = plt.subplots(3, 3, figsize=(14, 9))
+        main_handles = []
+
         a = axs[0, 0]
-        if log["base_vel_x"]: a.plot(time, log["base_vel_x"], label='measured')
-        if log["command_x"]: a.plot(time, log["command_x"], label='commanded')
-        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity x')
-        a.legend()
-        # plot base vel y
+        if log["base_vel_x"]:
+            append_handle(main_handles, a.plot(time, log["base_vel_x"], label="actual base vel x")[0])
+        if log["command_x"]:
+            append_handle(main_handles, a.plot(time, log["command_x"], label="commanded vel x")[0])
+        a.set(xlabel="time [s]", ylabel="base lin vel [m/s]", title="Base Velocity X")
+
         a = axs[0, 1]
-        if log["base_vel_y"]: a.plot(time, log["base_vel_y"], label='measured')
-        if log["command_y"]: a.plot(time, log["command_y"], label='commanded')
-        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity y')
-        a.legend()
-        # plot base vel yaw
+        if log["base_vel_y"]:
+            append_handle(main_handles, a.plot(time, log["base_vel_y"], label="actual base vel y")[0])
+        if log["command_y"]:
+            append_handle(main_handles, a.plot(time, log["command_y"], label="commanded vel y")[0])
+        a.set(xlabel="time [s]", ylabel="base lin vel [m/s]", title="Base Velocity Y")
+
         a = axs[0, 2]
-        if log["base_vel_yaw"]: a.plot(time, log["base_vel_yaw"], label='measured')
-        if log["command_yaw"]: a.plot(time, log["command_yaw"], label='commanded')
-        a.set(xlabel='time [s]', ylabel='base ang vel [rad/s]', title='Base velocity yaw')
-        a.legend()
-        # plot base vel z
+        if log["base_vel_yaw"]:
+            append_handle(main_handles, a.plot(time, log["base_vel_yaw"], label="actual yaw rate")[0])
+        if log["command_yaw"]:
+            append_handle(main_handles, a.plot(time, log["command_yaw"], label="commanded yaw rate")[0])
+        a.set(xlabel="time [s]", ylabel="base ang vel [rad/s]", title="Base Velocity Yaw")
+
+        a = axs[1, 0]
+        if log["dof_pos"]:
+            append_handle(main_handles, a.plot(time, log["dof_pos"], label="actual joint pos")[0])
+        if log["dof_pos_target"]:
+            append_handle(main_handles, a.plot(time, log["dof_pos_target"], label="target joint pos")[0])
+        a.set(xlabel="time [s]", ylabel="position [rad]", title=f"Joint Position: {logged_joint_name}")
+
+        a = axs[1, 1]
+        if log["dof_vel"]:
+            append_handle(main_handles, a.plot(time, log["dof_vel"], label="actual joint vel")[0])
+        if log["dof_vel_target"]:
+            append_handle(main_handles, a.plot(time, log["dof_vel_target"], label="target joint vel")[0])
+        a.set(xlabel="time [s]", ylabel="velocity [rad/s]", title=f"Joint Velocity: {logged_joint_name}")
+
         a = axs[1, 2]
-        if log["base_vel_z"]: a.plot(time, log["base_vel_z"], label='measured')
-        a.set(xlabel='time [s]', ylabel='base lin vel [m/s]', title='Base velocity z')
-        a.legend()
-        # plot contact forces
+        if log["base_vel_z"]:
+            append_handle(main_handles, a.plot(time, log["base_vel_z"], label="actual base vel z")[0])
+        a.set(xlabel="time [s]", ylabel="base lin vel [m/s]", title="Base Velocity Z")
+
         a = axs[2, 0]
         if log["contact_forces_z"]:
             forces = np.array(log["contact_forces_z"])
-            for i in range(forces.shape[1]):
-                a.plot(time, forces[:, i], label=f'force {i}')
-        a.set(xlabel='time [s]', ylabel='Forces z [N]', title='Vertical Contact forces')
-        a.legend()
-        # plot torque/vel curves
+            for index in range(forces.shape[1]):
+                contact_label = contact_names[index] if index < len(contact_names) else f"contact {index}"
+                append_handle(main_handles, a.plot(time, forces[:, index], label=contact_label)[0])
+        a.set(xlabel="time [s]", ylabel="forces z [N]", title="Vertical Contact Forces")
+
         a = axs[2, 1]
-        if log["dof_vel"] != [] and log["dof_torque"] != []: a.plot(log["dof_vel"], log["dof_torque"], 'x',
-                                                                    label='measured')
-        a.set(xlabel='Joint vel [rad/s]', ylabel='Joint Torque [Nm]', title='Torque/velocity curves')
-        a.legend()
-        # plot torque
-        # a = axs[2, 2]
-        # if log["dof_torque"] != []: a.plot(time, log["dof_torque"], label='measured')
-        # a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title='Torque')
-        # a.legend()
-        # plot torques for each joint
+        if log["dof_vel"] != [] and log["dof_torque"] != []:
+            append_handle(
+                main_handles,
+                a.plot(log["dof_vel"], log["dof_torque"], "x", label=f"{logged_joint_name} torque-velocity")[0],
+            )
+        a.set(xlabel="joint vel [rad/s]", ylabel="joint torque [Nm]", title=f"Torque vs Velocity: {logged_joint_name}")
 
-        # base height
         a = axs[2, 2]
-        if log["base_height"] : a.plot(time, log["base_height"], label='measured')
-        if log["command_height"]: a.plot(time, log["command_height"], label='target')
-        a.set(xlabel='time [s]', ylabel='base height [m]', title='Base height')
-        a.legend()
+        if log["base_height"]:
+            append_handle(main_handles, a.plot(time, log["base_height"], label="actual base height")[0])
+        if log["command_height"]:
+            append_handle(main_handles, a.plot(time, log["command_height"], label="target base height")[0])
+        a.set(xlabel="time [s]", ylabel="base height [m]", title="Base Height")
 
-        # another plot
+        main_handles = dedup_handles(main_handles)
+        if main_handles:
+            fig.legend(
+                handles=main_handles,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.99),
+                ncol=4,
+                fontsize=8,
+                framealpha=0.8,
+                columnspacing=1.2,
+                handlelength=1.8,
+            )
+        fig.suptitle("Inference Tracking Overview", fontsize=14)
+        fig.tight_layout(rect=(0.02, 0.04, 0.98, 0.92))
+
+        fig2 = None
         if log["torques"]:
             num_joints = len(log["torques"][0])
-            fig2, axs2 = plt.subplots(4, num_joints // 4, figsize=(12, 8))
+            fig2, axs2 = plt.subplots(4, num_joints // 4, figsize=(12, 9))
+            joint_handles = []
             for joint_idx in range(num_joints):
-                a = axs2[joint_idx % 4, joint_idx // 4]  # 这里你可能需要根据实际情况调整 axs 的索引
-                # 遍历每个时间步，获取对应关节的扭矩
+                a = axs2[joint_idx % 4, joint_idx // 4]
+                joint_name = joint_names[joint_idx] if joint_idx < len(joint_names) else f"joint_{joint_idx}"
                 joint_torques = [torque[joint_idx] for torque in log["torques"]]
-                a.plot(time, joint_torques, label='torque')
-                a.set(xlabel='time [s]', ylabel='Joint Torque [Nm]', title=f'Joint {joint_idx} Torque ')
-                a.legend()
+                append_handle(joint_handles, a.plot(time, joint_torques, label="torque [Nm]")[0])
+                a.set(xlabel="time [s]", ylabel="joint torque [Nm]", title=joint_name)
                 if log["velocities"]:
                     a2 = a.twinx()
                     joint_velocities = [vel[joint_idx] for vel in log["velocities"]]
-                    a2.plot(time, joint_velocities, 'r--', label='Velocity')  # 红色虚线曲线
-                    a2.set_ylabel('Joint Velocity [rad/s]', color='r')
-                    a2.legend()
+                    append_handle(joint_handles, a2.plot(time, joint_velocities, "r--", label="velocity [rad/s]")[0])
+                    a2.set_ylabel("joint velocity [rad/s]", color="r")
 
-        plt.tight_layout()
-        plt.show()
+            joint_handles = dedup_handles(joint_handles)
+            if joint_handles:
+                fig2.legend(
+                    handles=joint_handles,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, 0.99),
+                    ncol=2,
+                    fontsize=8,
+                    framealpha=0.8,
+                    handlelength=2.0,
+                )
+            fig2.suptitle("Per-Joint Torque and Velocity", fontsize=14)
+            fig2.tight_layout(rect=(0.02, 0.04, 0.98, 0.94))
+
+        if save_path is not None:
+            fig.savefig(save_path, dpi=200, bbox_inches="tight")
+            if fig2 is not None:
+                root, ext = os.path.splitext(save_path)
+                fig2.savefig(f"{root}_joints{ext}", dpi=200, bbox_inches="tight")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+            if fig2 is not None:
+                plt.close(fig2)
 
     def print_rewards(self):
         print("Average rewards per second:")
