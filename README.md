@@ -18,8 +18,8 @@ python scripts/train.py \
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_rough_play \
-  --load_run May30_00-20-46_ \
-  --checkpoint 77000 \
+  --load_run May29_17-07-09_ \
+  --checkpoint 70900 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
