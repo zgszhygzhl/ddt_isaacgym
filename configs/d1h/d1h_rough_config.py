@@ -698,8 +698,8 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         selected = False
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
         slope_treshold = 0.2
-        step_height = [0.12, 0.12]
-        step_width = 0.70
+        step_height = [0.17, 0.17]
+        step_width = 0.3
         # mesh_type = 'plane'
         # curriculum = True
         # measure_heights = True
