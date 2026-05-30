@@ -558,22 +558,22 @@ class D1HRoughCfg( LeggedRobotCfg ):
 
     class commands( LeggedRobotCfg.control ):
         curriculum = True 
-        max_curriculum = 1.0
-        max_curriculum_x = 0.8
-        max_curriculum_x_back = 0.8
+        max_curriculum = 2.0
+        max_curriculum_x = 2
+        max_curriculum_x_back = 2
         max_curriculum_y = 0.5
         max_curriculum_yaw = 1.0
         num_commands = 4  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
         heading_command = True  # if true: compute ang vel command from heading error
         global_reference = False
-        zero_command_ratio = 0.15
+        zero_command_ratio = 0.22
         zero_lin_vel_threshold = 0.05
-        zero_yaw_threshold = 0.05
-        startup_freeze_time = 1.0
+        zero_yaw_threshold = 0.02
+        startup_freeze_time = 0.8
 
         class ranges:
-            lin_vel_x = [-0.65, 0.65]  # min max [m/s]
+            lin_vel_x = [-0.8, 0.8]  # min max [m/s]
             lin_vel_y = [-0.2, 0.2]  # min max [m/s]
             ang_vel_yaw = [-0.5, 0.5]  # min max [rad/s]
             heading = [-3.14, 3.14]
@@ -610,18 +610,18 @@ class D1HRoughCfg( LeggedRobotCfg ):
             stand_still = -3.0
             zero_base_vel = -16.0
             zero_wheel_vel = -0.05
-            zero_yaw_rate = -5.0
+            zero_yaw_rate = -25.0
             upward = 3.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
             body_feet_distance_x = -2.0
-            body_feet_distance_y = -10.0
+            body_feet_distance_y = -13.0
             body_symmetry_y = 0.5
             body_symmetry_z = 0.2
             collision_hard = -30.0
         
         only_positive_rewards = False
-        tracking_sigma = 0.1  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma = 0.07  # tracking reward = exp(-error^2/sigma)
         distance_sigma = 0.09  # distance reward = exp(-distance^2/sigma)
         soft_dof_pos_limit = 0.9  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 0.9
@@ -696,7 +696,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         curriculum = True
         max_init_terrain_level = 0
         selected = False
-        terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
+        terrain_proportions = [1.0, 0.0, .0, 0.0, 0.0]
         slope_treshold = 0.2
         step_height = [0.17, 0.17]
         step_width = 0.3
@@ -723,7 +723,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
     class commands( D1HRoughCfg.commands ):
         heading_command = True  # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [0.7, 0.7]  # min max [m/s]
+            lin_vel_x = [0.0, 0.0]  # min max [m/s]
             lin_vel_y = [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [0.0, 0.0]  # min max [rad/s]
             heading = [0.0, 0.0]
@@ -768,7 +768,7 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         policy_class_name = 'ActorCriticBarlowTwins'
         runner_class_name = 'OnConstraintPolicyRunner'
         algorithm_class_name = 'NP3O'
-        save_interval = 100
+        save_interval = 200
         max_iterations = 40000
         num_steps_per_env = 24
         record_video = True
