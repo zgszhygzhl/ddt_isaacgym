@@ -7,26 +7,26 @@ cd /root/gpufree-data/ddt_rl_isaacgym
 
 训练
 python scripts/train.py \
-  --task=d1h_rough \
+  --task=d1h_moe_base \
   --headless \
   --num_envs 4096 \
-  --max_iterations 15000 \
+  --max_iterations 5000 \
   --resume \
-  --load_run May30_00-20-46_ \
-  --checkpoint 77000 
+  --load_run Jun05_17-58-53_ \
+  --checkpoint 8600
 
 推理 录制
 python scripts/simple_play.py \
-  --task=d1h_rough_play \
-  --load_run May28_10-39-11_ \
-  --checkpoint 20800 \
+  --task=d1h_moe_base_play \
+  --load_run Jun05_17-58-53_ \
+  --checkpoint 8600 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
 
 看板
 tensorboard \
-  --logdir logs/d1h_rough \
+  --logdir logs/d1h_moe_base \
   --host 0.0.0.0 \
   --port 6008
 

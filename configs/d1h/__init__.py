@@ -3,6 +3,18 @@ from .d1h_flat_config import *
 task_registry.register("d1h_flat",D1HFlat,D1HFlatCfg(),D1HFlatCfgPPO())
 task_registry.register("d1h_flat_play",D1HFlat,D1HFlatCfg_Play(),D1HFlatCfgPPO())
 
-from .d1h_rough_config import *
-task_registry.register("d1h_rough",D1HRough,D1HRoughCfg(),D1HRoughCfgPPO())
-task_registry.register("d1h_rough_play",D1HRough,D1HRoughCfg_Play(),D1HRoughCfgPPO())
+from .d1h_base_config import *
+task_registry.register("d1h_moe_base", D1HMoEBase, D1HMoEBaseCfg(), D1HMoEBaseCfgPPO())
+task_registry.register("d1h_moe_base_play", D1HMoEBase, D1HMoEBaseCfg_Play(), D1HMoEBaseCfgPPO())
+
+from .d1h_disc_config import *
+task_registry.register("d1h_moe_disc", D1HRough, D1HMoEDiscCfg(), D1HMoEDiscCfgPPO())
+
+from .d1h_surf_config import *
+task_registry.register("d1h_moe_surf", D1HRough, D1HMoESurfCfg(), D1HMoESurfCfgPPO())
+
+from .d1h_prec_config import *
+task_registry.register("d1h_moe_prec", D1HRough, D1HMoEPrecCfg(), D1HMoEPrecCfgPPO())
+
+from .d1h_rec_config import *
+task_registry.register("d1h_moe_rec", D1HMoERecovery, D1HMoERecCfg(), D1HMoERecCfgPPO())

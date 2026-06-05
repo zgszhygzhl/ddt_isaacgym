@@ -10,7 +10,7 @@ from configs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from configs.base.legged_robot import LeggedRobot
 from utils.math import wrap_to_pi
 
-class D1HRough(LeggedRobot):
+class D1HMoEBase(LeggedRobot):
     def _init_buffers(self):
         super()._init_buffers()
         self.hip_joint_indices = [0, 4]
@@ -63,7 +63,7 @@ class D1HRough(LeggedRobot):
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
             heading = torch.atan2(forward[:, 1], forward[:, 0])
-            self.commands[:, 2] = torch.clip(0.5 * wrap_to_pi(self.commands[:, 3] - heading), -1.0, 1.0)
+            self.commands[:, 2] = torch.clip(1.0 * wrap_to_pi(self.commands[:, 3] - heading), -1.0, 1.0)
 
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights()
@@ -495,7 +495,7 @@ class D1HRough(LeggedRobot):
         non_hip_foot_indices = [i for i in range(self.num_dof) if i not in self.hip_joint_indices and i not in self.foot_joint_indices]
         return torch.sum(torch.abs(self.dof_pos[:, non_hip_foot_indices] - self.default_dof_pos[:,non_hip_foot_indices]), dim=1)
     
-class D1HRoughCfg( LeggedRobotCfg ):
+class D1HMoEBaseCfg( LeggedRobotCfg ):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         n_scan = 187
@@ -508,17 +508,17 @@ class D1HRoughCfg( LeggedRobotCfg ):
         contact_termination_duration = 0.03
         min_base_height_for_reset = 0.03
     class init_state( LeggedRobotCfg.init_state ):
-        pos = [0.0, 0.0, 0.16] # x,y,z [m]
+        pos = [0.0, 0.0, 0.5] # x,y,z [m]
         rot = [0, 0.0, 0.0, 1]  # x, y, z, w [quat]
         reset_joint_angles = {
-            'FL_hip_joint': 0.2,
-            'FR_hip_joint': -0.2,
+            'FL_hip_joint': 0.0,
+            'FR_hip_joint': 0.0,
 
-            'FL_thigh_joint': 1.3,
-            'FR_thigh_joint': 1.3,
+            'FL_thigh_joint': 0.8,
+            'FR_thigh_joint': 0.8,
 
-            'FL_calf_joint': -2.75,
-            'FR_calf_joint': -2.75,
+            'FL_calf_joint': -1.5,
+            'FR_calf_joint': -1.5,
 
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
@@ -556,13 +556,13 @@ class D1HRoughCfg( LeggedRobotCfg ):
         hip_scale_reduction = 0.5
         use_filter = True
 
-    class commands( LeggedRobotCfg.control ):
+    class commands( LeggedRobotCfg.commands ):
         curriculum = True 
-        max_curriculum = 2.0
-        max_curriculum_x = 2
-        max_curriculum_x_back = 2
-        max_curriculum_y = 0.5
-        max_curriculum_yaw = 1.0
+        max_curriculum = 3.0
+        max_curriculum_x = 3
+        max_curriculum_x_back = 3
+        max_curriculum_y = 1.0
+        max_curriculum_yaw = 2.0
         num_commands = 4  # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10.  # time before command are changed[s]
         heading_command = True  # if true: compute ang vel command from heading error
@@ -570,10 +570,10 @@ class D1HRoughCfg( LeggedRobotCfg ):
         zero_command_ratio = 0.22
         zero_lin_vel_threshold = 0.05
         zero_yaw_threshold = 0.02
-        startup_freeze_time = 0.8
+        startup_freeze_time = 0.1
 
         class ranges:
-            lin_vel_x = [-0.8, 0.8]  # min max [m/s]
+            lin_vel_x = [-0.5, 0.5]  # min max [m/s]
             lin_vel_y = [-0.2, 0.2]  # min max [m/s]
             ang_vel_yaw = [-0.5, 0.5]  # min max [rad/s]
             heading = [-3.14, 3.14]
@@ -602,16 +602,17 @@ class D1HRoughCfg( LeggedRobotCfg ):
             orientation = -10.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
             ang_vel_xy = -0.10   #x、y 轴角速度的平方和，惩罚前后翻、左右晃的角速度
             dof_acc = -2.5e-7
-            base_height = -30.0
+            base_height = -60.0
             feet_air_time = 3.0
             collision = -18.0
             feet_stumble = 0.0
             action_rate = -0.1
-            stand_still = -3.0
+            stand_still = -2.0
             zero_base_vel = -16.0
             zero_wheel_vel = -0.05
             zero_yaw_rate = -25.0
             upward = 3.0
+            heading = -5.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
             body_feet_distance_x = -2.0
@@ -649,12 +650,13 @@ class D1HRoughCfg( LeggedRobotCfg ):
         curriculum = True
         measure_heights = True
         include_act_obs_pair_buf = False
-        # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete, stepping stones, gap]
-        terrain_proportions = [0.05, 0.05, 0.7, 0.2, 0.0]
+        # 只保留平地到轻微斜坡，用作 base policy 的默认滚动训练场景。
+        # 在 terrain.py 中，smooth slope 会随着 curriculum 的 difficulty 从平地逐步过渡到轻微坡面。
+        terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
         slope_treshold = 0.75  # slopes above this threshold will be corrected to vertical surfaces
-        step_height = [0.03, 0.17]
+        step_height = [0.0, 0.0]
         step_width_range = [0.20, 0.82]
-        slope = [0, 0.6]
+        slope = [0.0, 0.12]
         # mesh_type = 'plane'
         # curriculum = True
         # measure_heights = True
@@ -662,20 +664,20 @@ class D1HRoughCfg( LeggedRobotCfg ):
 
     class sim(LeggedRobotCfg.sim):
         dt = 0.0025
-class D1HRoughCfg_Play( D1HRoughCfg ):
-    class env(D1HRoughCfg.env):
+class D1HMoEBaseCfg_Play( D1HMoEBaseCfg ):
+    class env(D1HMoEBaseCfg.env):
         num_envs = 10
         deterministic_reset = True
-    class init_state(D1HRoughCfg.init_state):
-        pos = [0.0, 0.0, 0.16]
+    class init_state(D1HMoEBaseCfg.init_state):
+        pos = [0.0, 0.0, 0.5]
         rot = [0, 0.0, 0.0, 1]
         reset_joint_angles = {
-            'FL_hip_joint': 0.2,
-            'FR_hip_joint': -0.2,
-            'FL_thigh_joint': 1.3,
-            'FR_thigh_joint': 1.3,
-            'FL_calf_joint': -2.75,
-            'FR_calf_joint': -2.75,
+            'FL_hip_joint': 0.0,
+            'FR_hip_joint': 0.0,
+            'FL_thigh_joint': 0.8,
+            'FR_thigh_joint': 0.8,
+            'FL_calf_joint': -1.5,
+            'FR_calf_joint': -1.5,
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
         }
@@ -689,7 +691,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
             'FL_foot_joint': 0,
             'FR_foot_joint': 0,
         }
-    class terrain(D1HRoughCfg.terrain):
+    class terrain(D1HMoEBaseCfg.terrain):
         mesh_type = 'trimesh'
         num_rows = 1
         num_cols = 1
@@ -698,18 +700,19 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         selected = False
         terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
         slope_treshold = 0.2
-        step_height = [0.17, 0.17]
+        step_height = [0.0, 0.0]
         step_width = 0.3
+        slope = [0.05, 0.05]
         # mesh_type = 'plane'
         # curriculum = True
         # measure_heights = True
 
 
-    class noise( D1HRoughCfg.noise ):
+    class noise( D1HMoEBaseCfg.noise ):
         add_noise = False
-    class control ( D1HRoughCfg.control ):
+    class control ( D1HMoEBaseCfg.control ):
         use_filter = True
-    class domain_rand( D1HRoughCfg.domain_rand ):
+    class domain_rand( D1HMoEBaseCfg.domain_rand ):
         push_robots = False
         randomize_friction = False
         randomize_base_com = False
@@ -720,10 +723,10 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
         randomize_restitution = False
         disturbance = False
         randomize_kpkd = False
-    class commands( D1HRoughCfg.commands ):
+    class commands( D1HMoEBaseCfg.commands ):
         heading_command = True  # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [0.8, 0.8]  # min max [m/s]
+            lin_vel_x = [1.5, 1.5]  # min max [m/s]
             lin_vel_y = [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [0.0, 0.0]  # min max [rad/s]
             heading = [0.0, 0.0]
@@ -732,7 +735,7 @@ class D1HRoughCfg_Play( D1HRoughCfg ):
             # ang_vel_yaw = [-.0, .0]  # min max [rad/s]
             # heading = [-.0, .0]
             
-class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
+class D1HMoEBaseCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
         learning_rate = 1.e-3
@@ -764,7 +767,7 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
       
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'd1h_rough'
+        experiment_name = 'd1h_moe_base'
         policy_class_name = 'ActorCriticBarlowTwins'
         runner_class_name = 'OnConstraintPolicyRunner'
         algorithm_class_name = 'NP3O'
@@ -784,3 +787,4 @@ class D1HRoughCfgPPO( LeggedRobotCfgPPO ):
         video_height = 720
         resume = False
         resume_path = ''
+

@@ -372,6 +372,15 @@ class ActorCriticRMA(nn.Module):
     def act(self, obs,**kwargs):
         self.update_distribution(obs)
         return self.distribution.sample()
+
+    def act_inference(self, obs):
+        if hasattr(self, "act_teacher"):
+            return self.act_teacher(obs)
+        elif hasattr(self, "act_student"):
+            return self.act_student(obs)
+        else:
+            self.update_distribution(obs)
+            return self.action_mean
     
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
@@ -581,6 +590,15 @@ class ActorCriticBarlowTwins(nn.Module):
     def act(self, obs,**kwargs):
         self.update_distribution(obs)
         return self.distribution.sample()
+
+    def act_inference(self, obs):
+        if hasattr(self, "act_teacher"):
+            return self.act_teacher(obs)
+        elif hasattr(self, "act_student"):
+            return self.act_student(obs)
+        else:
+            self.update_distribution(obs)
+            return self.action_mean
     
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
