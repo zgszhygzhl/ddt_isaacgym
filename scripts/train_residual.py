@@ -21,7 +21,7 @@ from utils.task_registry import task_registry
 
 def get_residual_args():
     custom_parameters = [
-        {"name": "--task", "type": str, "default": "d1h_disc", "help": "Task name."},
+        {"name": "--task", "type": str, "default": "d1h_moe_disc", "help": "Task name."},
         {"name": "--resume", "action": "store_true", "default": False, "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str, "help": "Override experiment name."},
         {"name": "--run_name", "type": str, "help": "Override run name."},

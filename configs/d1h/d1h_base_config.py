@@ -573,9 +573,9 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
         startup_freeze_time = 0.1
 
         class ranges:
-            lin_vel_x = [-0.5, 0.5]  # min max [m/s]
-            lin_vel_y = [-0.2, 0.2]  # min max [m/s]
-            ang_vel_yaw = [-0.5, 0.5]  # min max [rad/s]
+            lin_vel_x = [-0.3, 0.3]  # min max [m/s]
+            lin_vel_y = [-0.1, 0.1]  # min max [m/s]
+            ang_vel_yaw = [-0.2, 0.2]  # min max [rad/s]
             heading = [-3.14, 3.14]
 
     class asset( LeggedRobotCfg.asset ):
@@ -599,11 +599,11 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
             tracking_lin_vel_y = 12.0
             tracking_ang_vel = 24.0
             lin_vel_z = -5.0
-            orientation = -10.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
+            orientation = -14.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
             ang_vel_xy = -0.10   #x、y 轴角速度的平方和，惩罚前后翻、左右晃的角速度
             dof_acc = -2.5e-7
-            base_height = -60.0
-            feet_air_time = 3.0
+            base_height = -75.0
+            feet_air_time = 1.0
             collision = -18.0
             feet_stumble = 0.0
             action_rate = -0.1
@@ -726,7 +726,7 @@ class D1HMoEBaseCfg_Play( D1HMoEBaseCfg ):
     class commands( D1HMoEBaseCfg.commands ):
         heading_command = True  # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [1.5, 1.5]  # min max [m/s]
+            lin_vel_x = [0.8, 0.8]  # min max [m/s]
             lin_vel_y = [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [0.0, 0.0]  # min max [rad/s]
             heading = [0.0, 0.0]

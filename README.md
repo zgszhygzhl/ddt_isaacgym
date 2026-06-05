@@ -10,16 +10,16 @@ python scripts/train.py \
   --task=d1h_moe_base \
   --headless \
   --num_envs 4096 \
-  --max_iterations 5000 \
+  --max_iterations 8000 \
   --resume \
-  --load_run Jun05_17-58-53_ \
-  --checkpoint 8600
+  --load_run Jun05_14-41-06_ \
+  --checkpoint 2200
 
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_moe_base_play \
-  --load_run Jun05_17-58-53_ \
-  --checkpoint 8600 \
+  --load_run Jun05_21-11-58_ \
+  --checkpoint 800 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4

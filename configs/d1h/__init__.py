@@ -8,13 +8,13 @@ task_registry.register("d1h_moe_base", D1HMoEBase, D1HMoEBaseCfg(), D1HMoEBaseCf
 task_registry.register("d1h_moe_base_play", D1HMoEBase, D1HMoEBaseCfg_Play(), D1HMoEBaseCfgPPO())
 
 from .d1h_disc_config import *
-task_registry.register("d1h_moe_disc", D1HRough, D1HMoEDiscCfg(), D1HMoEDiscCfgPPO())
+task_registry.register("d1h_moe_disc", D1HMoEBase, D1HMoEDiscCfg(), D1HMoEDiscCfgPPO())
 
 from .d1h_surf_config import *
-task_registry.register("d1h_moe_surf", D1HRough, D1HMoESurfCfg(), D1HMoESurfCfgPPO())
+task_registry.register("d1h_moe_surf", D1HMoEBase, D1HMoESurfCfg(), D1HMoESurfCfgPPO())
 
 from .d1h_prec_config import *
-task_registry.register("d1h_moe_prec", D1HRough, D1HMoEPrecCfg(), D1HMoEPrecCfgPPO())
+task_registry.register("d1h_moe_prec", D1HMoEBase, D1HMoEPrecCfg(), D1HMoEPrecCfgPPO())
 
 from .d1h_rec_config import *
 task_registry.register("d1h_moe_rec", D1HMoERecovery, D1HMoERecCfg(), D1HMoERecCfgPPO())

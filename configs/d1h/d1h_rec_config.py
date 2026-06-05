@@ -1,10 +1,10 @@
 from isaacgym.torch_utils import quat_from_euler_xyz, torch_rand_float
 from isaacgym import gymtorch
 
-from .d1h_rough_config import D1HRough, D1HRoughCfg, D1HRoughCfgPPO
+from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
-class D1HMoERecovery(D1HRough):
+class D1HMoERecovery(D1HMoEBase):
     def _reset_root_states(self, env_ids):
         deterministic_reset = getattr(self.cfg.env, "deterministic_reset", False)
 
@@ -35,8 +35,8 @@ class D1HMoERecovery(D1HRough):
         )
 
 
-class D1HMoERecCfg(D1HRoughCfg):
-    class commands(D1HRoughCfg.commands):
+class D1HMoERecCfg(D1HMoEBaseCfg):
+    class commands(D1HMoEBaseCfg.commands):
         zero_command_ratio = 0.55
         max_curriculum = 1.0
         max_curriculum_x = 0.8
@@ -50,13 +50,13 @@ class D1HMoERecCfg(D1HRoughCfg):
             ang_vel_yaw = [-0.2, 0.2]
             heading = [-3.14, 3.14]
 
-    class terrain(D1HRoughCfg.terrain):
+    class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
         terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
         step_height = [0.0, 0.0]
         slope = [0.0, 0.12]
 
-    class domain_rand(D1HRoughCfg.domain_rand):
+    class domain_rand(D1HMoEBaseCfg.domain_rand):
         push_robots = True
         push_interval_s = 8
         max_push_vel_xy = 1.5
@@ -70,8 +70,8 @@ class D1HMoERecCfg(D1HRoughCfg):
         randomize_friction = True
         friction_range = [0.2, 1.8]
 
-    class rewards(D1HRoughCfg.rewards):
-        class scales(D1HRoughCfg.rewards.scales):
+    class rewards(D1HMoEBaseCfg.rewards):
+        class scales(D1HMoEBaseCfg.rewards.scales):
             tracking_lin_vel_x = 10.0
             tracking_lin_vel_y = 5.0
             tracking_ang_vel = 8.0
@@ -85,6 +85,6 @@ class D1HMoERecCfg(D1HRoughCfg):
             action_rate = -0.04
 
 
-class D1HMoERecCfgPPO(D1HRoughCfgPPO):
-    class runner(D1HRoughCfgPPO.runner):
+class D1HMoERecCfgPPO(D1HMoEBaseCfgPPO):
+    class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_rec'

@@ -1,8 +1,8 @@
-from .d1h_rough_config import D1HRough, D1HRoughCfg, D1HRoughCfgPPO
+from .d1h_base_config import D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
-class D1HMoESurfCfg(D1HRoughCfg):
-    class commands(D1HRoughCfg.commands):
+class D1HMoESurfCfg(D1HMoEBaseCfg):
+    class commands(D1HMoEBaseCfg.commands):
         max_curriculum = 1.8
         max_curriculum_x = 1.5
         max_curriculum_x_back = 1.0
@@ -16,13 +16,13 @@ class D1HMoESurfCfg(D1HRoughCfg):
             ang_vel_yaw = [-0.4, 0.4]
             heading = [-3.14, 3.14]
 
-    class terrain(D1HRoughCfg.terrain):
+    class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
         terrain_proportions = [0.55, 0.45, 0.0, 0.0, 0.0]
         step_height = [0.0, 0.0]
         slope = [0.0, 0.25]
 
-    class domain_rand(D1HRoughCfg.domain_rand):
+    class domain_rand(D1HMoEBaseCfg.domain_rand):
         randomize_friction = True
         friction_range = [0.08, 1.6]
         randomize_restitution = True
@@ -37,8 +37,8 @@ class D1HMoESurfCfg(D1HRoughCfg):
         disturbance = True
         push_robots = True
 
-    class rewards(D1HRoughCfg.rewards):
-        class scales(D1HRoughCfg.rewards.scales):
+    class rewards(D1HMoEBaseCfg.rewards):
+        class scales(D1HMoEBaseCfg.rewards.scales):
             tracking_lin_vel_x = 24.0
             tracking_lin_vel_y = 12.0
             tracking_ang_vel = 22.0
@@ -49,6 +49,6 @@ class D1HMoESurfCfg(D1HRoughCfg):
             upward = 4.0
 
 
-class D1HMoESurfCfgPPO(D1HRoughCfgPPO):
-    class runner(D1HRoughCfgPPO.runner):
+class D1HMoESurfCfgPPO(D1HMoEBaseCfgPPO):
+    class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_surf'

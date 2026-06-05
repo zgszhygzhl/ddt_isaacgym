@@ -1,8 +1,8 @@
-from .d1h_rough_config import D1HRough, D1HRoughCfg, D1HRoughCfgPPO
+from .d1h_base_config import D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
-class D1HMoEPrecCfg(D1HRoughCfg):
-    class commands(D1HRoughCfg.commands):
+class D1HMoEPrecCfg(D1HMoEBaseCfg):
+    class commands(D1HMoEBaseCfg.commands):
         zero_command_ratio = 0.65
         max_curriculum = 0.8
         max_curriculum_x = 0.5
@@ -16,14 +16,14 @@ class D1HMoEPrecCfg(D1HRoughCfg):
             ang_vel_yaw = [-0.15, 0.15]
             heading = [-3.14, 3.14]
 
-    class terrain(D1HRoughCfg.terrain):
+    class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
         terrain_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
         step_height = [0.0, 0.0]
         slope = [0.0, 0.05]
 
-    class rewards(D1HRoughCfg.rewards):
-        class scales(D1HRoughCfg.rewards.scales):
+    class rewards(D1HMoEBaseCfg.rewards):
+        class scales(D1HMoEBaseCfg.rewards.scales):
             tracking_lin_vel_x = 16.0
             tracking_lin_vel_y = 10.0
             tracking_ang_vel = 14.0
@@ -36,6 +36,6 @@ class D1HMoEPrecCfg(D1HRoughCfg):
             action_rate = -0.08
 
 
-class D1HMoEPrecCfgPPO(D1HRoughCfgPPO):
-    class runner(D1HRoughCfgPPO.runner):
+class D1HMoEPrecCfgPPO(D1HMoEBaseCfgPPO):
+    class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_prec'
