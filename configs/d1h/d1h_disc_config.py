@@ -3,12 +3,20 @@ from .d1h_base_config import D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
-        max_curriculum = 1.2
-        max_curriculum_x = 1.0
-        max_curriculum_x_back = 0.8
-        max_curriculum_y = 0.25
-        max_curriculum_yaw = 0.6
-        zero_command_ratio = 0.1
+        curriculum = True
+
+        max_curriculum_x = 0.6
+        max_curriculum_x_back = 0.1
+        max_curriculum_y = 0.10
+        max_curriculum_yaw = 0.30
+
+        zero_command_ratio = 0.02
+
+        class ranges:
+            lin_vel_x = [0.05, 0.5]
+            lin_vel_y = [-0.05, 0.05]
+            ang_vel_yaw = [-0.25, 0.25]
+            heading = [-3.14, 3.14]
 
         class ranges:
             lin_vel_x = [-0.3, 0.6]
@@ -20,20 +28,30 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum = True
         terrain_proportions = [0.0, 0.05, 0.55, 0.3, 0.1]
         step_height = [0.05, 0.2]
-        step_width_range = [0.18, 0.5]
+        step_width_range = [0.25, 0.5]
         slope = [0.0, 0.15]
 
     class rewards(D1HMoEBaseCfg.rewards):
         class scales(D1HMoEBaseCfg.rewards.scales):
-            tracking_lin_vel_x = 18.0
-            tracking_lin_vel_y = 8.0
-            tracking_ang_vel = 16.0
+            tracking_lin_vel_x = 14.0
+            tracking_lin_vel_y = 5.0
+            tracking_ang_vel = 12.0
             orientation = -14.0
             upward = 4.0
             collision = -14.0
             collision_hard = -20.0
             action_rate = -0.03
-            zero_base_vel = -8.0
+            stand_still = -0.2
+            zero_base_vel = -1.0
+            zero_yaw_rate = -1.0
+            zero_wheel_vel = -0.02
+            feet_air_time = 1.0
+            lin_vel_z = -1.0
+            body_pos_to_feet_x = 0.3
+            body_feet_distance_x = -1.0
+            body_feet_distance_y = -5.0
+            body_symmetry_y = 0.2
+            body_symmetry_z = 0.0
 
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):

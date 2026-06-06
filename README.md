@@ -46,6 +46,14 @@ python scripts/train_residual.py \
   --residual_alpha 0.3 \
   --run_name residual_disc_base7400
 
+
+推理moe
+python scripts/play_residual.py \
+--task d1h_moe_disc \
+--base_task d1h_moe_base \
+--load_run Jun06_16-49-05_residual_disc_base7400 \
+--headless
+
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)
 2. Install pytorch 1.10 with cuda-11.3:
