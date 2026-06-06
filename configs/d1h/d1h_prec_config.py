@@ -38,10 +38,12 @@ class D1HMoEPrecCfg(D1HMoEBaseCfg):
 
 class D1HMoEPrecCfgPPO(D1HMoEBaseCfgPPO):
     class policy(D1HMoEBaseCfgPPO.policy):
+        actor_hidden_dims = [256, 128, 64]
         barlow_actor_hidden_dims = [256, 128, 64]
         barlow_mlp_encoder_dims = [128, 64]
         barlow_latent_dim = 16
         barlow_obs_encoder_dims = [128, 64]
+        critic_hidden_dims = [256, 128, 64]
 
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_prec'

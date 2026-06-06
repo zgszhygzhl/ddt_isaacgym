@@ -11,6 +11,7 @@ class ResidualExpertActorCritic(nn.Module):
         self.base_actor_critic = base_actor_critic
         self.residual_actor_critic = residual_actor_critic
         self.alpha = alpha
+        self.freeze_base = freeze_base
         self.imi_flag = getattr(self.residual_actor_critic, "imi_flag", False)
         self.distribution = None
 
@@ -18,7 +19,7 @@ class ResidualExpertActorCritic(nn.Module):
         self.last_residual_mean = None
         self.last_final_mean = None
 
-        if freeze_base:
+        if self.freeze_base:
             self.base_actor_critic.eval()
             for parameter in self.base_actor_critic.parameters():
                 parameter.requires_grad = False
@@ -43,6 +44,15 @@ class ResidualExpertActorCritic(nn.Module):
     def reset(self, dones=None):
         self.base_actor_critic.reset(dones)
         self.residual_actor_critic.reset(dones)
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.residual_actor_critic.train(mode)
+        if self.freeze_base:
+            self.base_actor_critic.eval()
+        else:
+            self.base_actor_critic.train(mode)
+        return self
 
     def update_distribution(self, obs):
         with torch.no_grad():

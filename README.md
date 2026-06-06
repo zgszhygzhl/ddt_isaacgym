@@ -19,7 +19,7 @@ python scripts/train.py \
 python scripts/simple_play.py \
   --task=d1h_moe_base_play \
   --load_run Jun06_09-51-25_ \
-  --checkpoint 5600 \
+  --checkpoint 7400 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
@@ -38,11 +38,13 @@ tmux attach -t d1h_train
 训练moe专家
 python scripts/train_residual.py \
   --task d1h_moe_disc \
+  --base_task d1h_moe_base \
+  --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --base_ckpt /path/to/base/model_80000.pt \
+  --max_iterations 3000 \
   --residual_alpha 0.3 \
-  --max_iterations 10000
+  --run_name residual_disc_base7400
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)
