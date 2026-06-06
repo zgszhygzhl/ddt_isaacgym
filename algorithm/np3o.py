@@ -271,6 +271,9 @@ class NP3O:
                 nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
+                if hasattr(self.actor_critic, "clamp_action_std"):
+                    self.actor_critic.clamp_action_std(min_std=0.02, max_std=0.6)
+
                 mean_value_loss += value_loss.item()
                 mean_cost_value_loss += cost_value_loss.item()
                 mean_viol_loss += viol_loss.item()

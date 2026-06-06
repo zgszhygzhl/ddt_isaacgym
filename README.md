@@ -26,7 +26,7 @@ ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt
 
 看板
 tensorboard \
-  --logdir logs/d1h_moe_base \
+  --logdir logs/d1h_moe_disc \
   --host 0.0.0.0 \
   --port 6008
 
@@ -42,17 +42,24 @@ python scripts/train_residual.py \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 3000 \
+  --max_iterations 8000 \
   --residual_alpha 0.3 \
   --run_name residual_disc_base7400
 
 
 推理moe
 python scripts/play_residual.py \
---task d1h_moe_disc \
---base_task d1h_moe_base \
---load_run Jun06_16-49-05_residual_disc_base7400 \
---headless
+  --task d1h_moe_disc \
+  --base_task d1h_moe_base \
+  --load_run Jun06_18-35-20_residual_disc_base7400 \
+  --checkpoint 3000 \
+  --num_envs 8 \
+  --record_num_envs 4 \
+  --mosaic_cols 2 \
+  --residual_alpha 0.3 \
+  --max_steps 1000 \
+  --disable_export
+
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)

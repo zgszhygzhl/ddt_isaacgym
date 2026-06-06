@@ -5,8 +5,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
         curriculum = True
 
-        max_curriculum_x = 0.6
-        max_curriculum_x_back = 0.1
+        max_curriculum_x = 1.2
+        max_curriculum_x_back = 0.2
         max_curriculum_y = 0.10
         max_curriculum_yaw = 0.30
 
@@ -18,15 +18,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             ang_vel_yaw = [-0.25, 0.25]
             heading = [-3.14, 3.14]
 
-        class ranges:
-            lin_vel_x = [-0.3, 0.6]
-            lin_vel_y = [-0.15, 0.15]
-            ang_vel_yaw = [-0.35, 0.35]
-            heading = [-3.14, 3.14]
 
     class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
-        terrain_proportions = [0.0, 0.05, 0.55, 0.3, 0.1]
+        terrain_proportions = [0.0, 0.05, 0.6, 0.3, 0.05]
         step_height = [0.05, 0.2]
         step_width_range = [0.25, 0.5]
         slope = [0.0, 0.15]
@@ -62,6 +57,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         barlow_latent_dim = 16
         barlow_obs_encoder_dims = [128, 64]
         critic_hidden_dims = [256, 128, 64]
+        init_noise_std = 0.3
 
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_disc'

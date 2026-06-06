@@ -58,14 +58,31 @@ class ResidualExpertActorCritic(nn.Module):
         with torch.no_grad():
             base_mean = self.base_actor_critic.act_inference(obs)
         residual_mean = self.residual_actor_critic.act_inference(obs)
-        final_mean = torch.clamp(base_mean + self.alpha * residual_mean, -1.0, 1.0)
+        # residual mean
+        delta = self.alpha * residual_mean
+        final_mean = base_mean + delta
 
+        # 关键：residual std 也要按 alpha 缩放，并限制范围
+        residual_std = self.get_std()
+        final_std = self.alpha * residual_std
+        final_std = torch.clamp(final_std, min=0.02, max=0.3)
+
+        self.distribution = Normal(final_mean, final_mean * 0.0 + final_std)
+
+        # 用于日志
         self.last_base_mean = base_mean.detach()
         self.last_residual_mean = residual_mean.detach()
+        self.last_delta = delta.detach()
         self.last_final_mean = final_mean.detach()
+        self.last_final_std = final_std.detach()
+        self.last_saturation_ratio = (final_mean.abs() > 0.95).float().mean().detach()
 
-        residual_std = self.get_std()
-        self.distribution = Normal(final_mean, final_mean * 0.0 + residual_std)
+        # 如果后面要加 residual 正则，这个不能 detach
+        self.current_delta = delta
+        
+    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+        if hasattr(self.residual_actor_critic, "clamp_action_std"):
+            self.residual_actor_critic.clamp_action_std(min_std, max_std)
 
     def act(self, obs, **kwargs):
         self.update_distribution(obs)

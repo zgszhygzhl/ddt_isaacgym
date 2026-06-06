@@ -348,8 +348,14 @@ class ActorCriticRMA(nn.Module):
         raise NotImplementedError
     
     def get_std(self):
-        return self.std
-    
+        # 避免 std 被训练成负数或爆炸
+        return torch.clamp(self.std, min=0.02, max=0.6)
+
+    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+        if hasattr(self, "std"):
+            with torch.no_grad():
+                self.std.data.clamp_(min_std, max_std)
+
     @property
     def action_mean(self):
         return self.distribution.mean
@@ -573,7 +579,13 @@ class ActorCriticBarlowTwins(nn.Module):
         raise NotImplementedError
     
     def get_std(self):
-        return self.std
+        # 避免 std 被训练成负数或爆炸
+        return torch.clamp(self.std, min=0.02, max=0.6)
+
+    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+        if hasattr(self, "std"):
+            with torch.no_grad():
+                self.std.data.clamp_(min_std, max_std)
     
     @property
     def action_mean(self):
