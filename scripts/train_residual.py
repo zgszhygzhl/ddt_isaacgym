@@ -22,6 +22,7 @@ from utils.task_registry import task_registry
 def get_residual_args():
     custom_parameters = [
         {"name": "--task", "type": str, "default": "d1h_moe_disc", "help": "Task name."},
+        {"name": "--base_task", "type": str, "default": "d1h_moe_base", "help": "Task name used to build the frozen base policy."},
         {"name": "--resume", "action": "store_true", "default": False, "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str, "help": "Override experiment name."},
         {"name": "--run_name", "type": str, "help": "Override run name."},
@@ -70,13 +71,17 @@ def train(args):
 
     env, _ = task_registry.make_env(name=args.task, args=args)
     _, train_cfg = task_registry.get_cfgs(args.task)
+    _, base_train_cfg = task_registry.get_cfgs(args.base_task)
     _, train_cfg = update_cfg_from_args(None, train_cfg, args)
     train_cfg_dict = class_to_dict(train_cfg)
+    base_train_cfg_dict = class_to_dict(base_train_cfg)
 
     policy_class_name = train_cfg_dict["runner"]["policy_class_name"]
+    base_policy_class_name = base_train_cfg_dict["runner"]["policy_class_name"]
     policy_cfg = train_cfg_dict["policy"]
+    base_policy_cfg = base_train_cfg_dict["policy"]
 
-    base_actor_critic = build_actor_critic("modules", policy_class_name, env, policy_cfg)
+    base_actor_critic = build_actor_critic("modules", base_policy_class_name, env, base_policy_cfg)
     residual_actor_critic = build_actor_critic("modules", policy_class_name, env, policy_cfg)
 
     if args.base_ckpt:
@@ -91,6 +96,7 @@ def train(args):
 
     log_dir = build_log_dir(train_cfg)
     print("[train_residual] task           =", args.task)
+    print("[train_residual] base_task      =", args.base_task)
     print("[train_residual] base_ckpt      =", args.base_ckpt)
     print("[train_residual] residual_alpha =", args.residual_alpha)
     print("[train_residual] log_dir        =", log_dir)

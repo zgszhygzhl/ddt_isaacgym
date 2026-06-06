@@ -627,6 +627,8 @@ class D1HRoughCfg( LeggedRobotCfg ):
         soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.9
         base_height_target = 0.45
+        base_height_scale = 0.05
+        base_height_deadband = 0.01
         max_contact_force = 500.  # forces above this value are penalized
     class costs(LeggedRobotCfg.costs):
         num_costs = 3

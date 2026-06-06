@@ -519,16 +519,20 @@ class ActorCriticBarlowTwins(nn.Module):
             self.scan_encoder_output_dim = num_scan
 
         self.history_encoder = StateHistoryEncoder(activation, num_prop, num_hist, 16)
+        barlow_actor_hidden_dims = kwargs.get("barlow_actor_hidden_dims", actor_hidden_dims)
+        barlow_mlp_encoder_dims = kwargs.get("barlow_mlp_encoder_dims", [128, 64])
+        barlow_latent_dim = kwargs.get("barlow_latent_dim", 16)
+        barlow_obs_encoder_dims = kwargs.get("barlow_obs_encoder_dims", [128, 64])
 
         # #MlpBarlowTwinsActor
         self.actor_teacher_backbone = MlpBarlowTwinsActor(num_prop=num_prop-3,
                                       num_hist=5,
                                       num_actions=num_actions,
-                                      actor_dims=[512,256,128],
-                                      mlp_encoder_dims=[128,64],
+                                      actor_dims=barlow_actor_hidden_dims,
+                                      mlp_encoder_dims=barlow_mlp_encoder_dims,
                                       activation=activation,
-                                      latent_dim=16,
-                                      obs_encoder_dims=[128,64])
+                                      latent_dim=barlow_latent_dim,
+                                      obs_encoder_dims=barlow_obs_encoder_dims)
         
         print(self.actor_teacher_backbone)
 

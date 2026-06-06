@@ -12,14 +12,14 @@ python scripts/train.py \
   --num_envs 4096 \
   --max_iterations 8000 \
   --resume \
-  --load_run Jun05_14-41-06_ \
-  --checkpoint 2200
+  --load_run Jun05_21-11-58_ \
+  --checkpoint 4400
 
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_moe_base_play \
-  --load_run Jun05_21-11-58_ \
-  --checkpoint 800 \
+  --load_run Jun06_09-51-25_ \
+  --checkpoint 5600 \
   --headless
 
 ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt yuv420p -movflags +faststart /root/gpufree-data/ddt_rl_isaacgym/record_h264.mp4
@@ -34,6 +34,15 @@ tmux
 tmux new -s d1h_train
 tmux ls
 tmux attach -t d1h_train
+
+训练moe专家
+python scripts/train_residual.py \
+  --task d1h_moe_disc \
+  --headless \
+  --num_envs 4096 \
+  --base_ckpt /path/to/base/model_80000.pt \
+  --residual_alpha 0.3 \
+  --max_iterations 10000
 
 ### Installation ###
 1. Create a new python virtual env with python 3.6, 3.7 or 3.8 (3.8 recommended)

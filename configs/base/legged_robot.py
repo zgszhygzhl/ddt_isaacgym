@@ -1176,7 +1176,15 @@ class LeggedRobot(BaseTask):
     def _reward_base_height(self):
         # Penalize base height away from target
         base_height = self._get_base_heights()
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
+        target = self.cfg.rewards.base_height_target
+
+        height_scale = max(getattr(self.cfg.rewards, "base_height_scale", 0.05), 1e-6)
+        deadband = max(getattr(self.cfg.rewards, "base_height_deadband", 0.01), 0.0)
+
+        error = torch.abs(base_height - target)
+        error = torch.clamp(error - deadband, min=0.0)
+
+        return torch.square(error / height_scale)
     
     def _reward_torques(self):
         # Penalize torques

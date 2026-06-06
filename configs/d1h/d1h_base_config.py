@@ -367,17 +367,17 @@ class D1HMoEBase(LeggedRobot):
         # If the tracking reward is above 80% of the maximum, increase the range of commands
         if "tracking_lin_vel" not in self.reward_scales:
             if "tracking_lin_vel_x" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_x"]:
+                if torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length > 0.75 * self.reward_scales["tracking_lin_vel_x"]:
                     self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2, -self.cfg.commands.max_curriculum_x_back, 0.)
                     self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
             
             if "tracking_lin_vel_y" in self.reward_scales:
-                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel_y"]:
+                if torch.mean(self.episode_sums["tracking_lin_vel_y"][env_ids]) / self.max_episode_length > 0.75 * self.reward_scales["tracking_lin_vel_y"]:
                     self.command_ranges["lin_vel_y"][0] = np.clip(self.command_ranges["lin_vel_y"][0] - 0.2, -self.cfg.commands.max_curriculum_y, 0.)
                     self.command_ranges["lin_vel_y"][1] = np.clip(self.command_ranges["lin_vel_y"][1] + 0.2, 0., self.cfg.commands.max_curriculum_y)
 
         elif "tracking_lin_vel" in self.reward_scales:
-            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.8 * self.reward_scales["tracking_lin_vel"]:
+            if torch.mean(self.episode_sums["tracking_lin_vel"][env_ids]) / self.max_episode_length > 0.75 * self.reward_scales["tracking_lin_vel"]:
                 self.command_ranges["lin_vel_x"][0] = np.clip(self.command_ranges["lin_vel_x"][0] - 0.2 , -self.cfg.commands.max_curriculum_x_back, 0.)
                 self.command_ranges["lin_vel_x"][1] = np.clip(self.command_ranges["lin_vel_x"][1] + 0.2, 0., self.cfg.commands.max_curriculum_x)
 
@@ -573,9 +573,9 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
         startup_freeze_time = 0.1
 
         class ranges:
-            lin_vel_x = [-0.3, 0.3]  # min max [m/s]
+            lin_vel_x = [-0.6, 0.6]  # min max [m/s]
             lin_vel_y = [-0.1, 0.1]  # min max [m/s]
-            ang_vel_yaw = [-0.2, 0.2]  # min max [rad/s]
+            ang_vel_yaw = [-0.6, 0.6]  # min max [rad/s]
             heading = [-3.14, 3.14]
 
     class asset( LeggedRobotCfg.asset ):
@@ -599,11 +599,11 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
             tracking_lin_vel_y = 12.0
             tracking_ang_vel = 24.0
             lin_vel_z = -5.0
-            orientation = -14.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
-            ang_vel_xy = -0.10   #x、y 轴角速度的平方和，惩罚前后翻、左右晃的角速度
+            orientation = -18.0  #projected_gravity 前两个分量的平方和，惩罚机身倾斜
+            ang_vel_xy = -0.18   #x、y 轴角速度的平方和，惩罚前后翻、左右晃的角速度
             dof_acc = -2.5e-7
-            base_height = -75.0
-            feet_air_time = 1.0
+            base_height = -2.5
+            feet_air_time = 0.5
             collision = -18.0
             feet_stumble = 0.0
             action_rate = -0.1
@@ -612,10 +612,10 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
             zero_wheel_vel = -0.05
             zero_yaw_rate = -25.0
             upward = 3.0
-            heading = -5.0
+            heading = -6.0
             # collision_head = -100.0
             body_pos_to_feet_x = 1.0
-            body_feet_distance_x = -2.0
+            body_feet_distance_x = -4.0
             body_feet_distance_y = -13.0
             body_symmetry_y = 0.5
             body_symmetry_z = 0.2
@@ -623,11 +623,13 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
         
         only_positive_rewards = False
         tracking_sigma = 0.07  # tracking reward = exp(-error^2/sigma)
-        distance_sigma = 0.09  # distance reward = exp(-distance^2/sigma)
+        distance_sigma = 0.08  # distance reward = exp(-distance^2/sigma)
         soft_dof_pos_limit = 0.9  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.9
         base_height_target = 0.45
+        base_height_scale = 0.05
+        base_height_deadband = 0.01
         max_contact_force = 500.  # forces above this value are penalized
     class costs(LeggedRobotCfg.costs):
         num_costs = 3
@@ -750,6 +752,10 @@ class D1HMoEBaseCfgPPO( LeggedRobotCfgPPO ):
         continue_from_last_std = True
         scan_encoder_dims = [128, 64, 32]
         actor_hidden_dims = [512, 256, 128]
+        barlow_actor_hidden_dims = [512, 256, 128]
+        barlow_mlp_encoder_dims = [128, 64]
+        barlow_latent_dim = 16
+        barlow_obs_encoder_dims = [128, 64]
         critic_hidden_dims = [512, 256, 128]
         #priv_encoder_dims = [64, 20]
         priv_encoder_dims = []

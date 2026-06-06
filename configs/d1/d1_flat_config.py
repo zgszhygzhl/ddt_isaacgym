@@ -147,7 +147,15 @@ class D1Flat(LeggedRobot):
     def _reward_base_height(self):
         # Penalize base height away from target
         base_height = self._get_base_heights()
-        return torch.clamp(-self.projected_gravity[:,2],0,1)*torch.square(base_height - self.cfg.rewards.base_height_target)
+        target = self.cfg.rewards.base_height_target
+
+        height_scale = max(getattr(self.cfg.rewards, "base_height_scale", 0.05), 1e-6)
+        deadband = max(getattr(self.cfg.rewards, "base_height_deadband", 0.01), 0.0)
+
+        error = torch.abs(base_height - target)
+        error = torch.clamp(error - deadband, min=0.0)
+
+        return torch.clamp(-self.projected_gravity[:,2],0,1) * torch.square(error / height_scale)
     def _reward_torques(self):
         # Penalize torques
         return torch.clamp(-self.projected_gravity[:,2],0,1)*torch.sum(torch.square(self.torques), dim=1)
@@ -377,6 +385,8 @@ class D1FlatCfg( LeggedRobotCfg ):
         soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.9
         base_height_target = 0.45
+        base_height_scale = 0.05
+        base_height_deadband = 0.01
         max_contact_force = 500.  # forces above this value are penalized
     class costs(LeggedRobotCfg.costs):
         num_costs = 5

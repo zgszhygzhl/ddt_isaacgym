@@ -50,5 +50,11 @@ class D1HMoESurfCfg(D1HMoEBaseCfg):
 
 
 class D1HMoESurfCfgPPO(D1HMoEBaseCfgPPO):
+    class policy(D1HMoEBaseCfgPPO.policy):
+        barlow_actor_hidden_dims = [256, 128, 64]
+        barlow_mlp_encoder_dims = [128, 64]
+        barlow_latent_dim = 16
+        barlow_obs_encoder_dims = [128, 64]
+
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_surf'
