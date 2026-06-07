@@ -4,6 +4,60 @@ from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
 class D1HMoEDisc(D1HMoEBase):
+    def _get_step_lift_context(self):
+        zeros = torch.zeros(self.num_envs, device=self.device)
+
+        if not getattr(self.cfg.terrain, "measure_heights", False):
+            return None
+        if not hasattr(self, "measured_heights") or not torch.is_tensor(self.measured_heights):
+            return None
+        if self.measured_heights.ndim != 2:
+            return None
+        if not hasattr(self, "height_points") or not hasattr(self, "commands"):
+            return None
+
+        points = self.height_points[0]
+        px = points[:, 0]
+        py = points[:, 1]
+
+        front_x_min = getattr(self.cfg.rewards, "step_clearance_front_x_min", 0.20)
+        front_x_max = getattr(self.cfg.rewards, "step_clearance_front_x_max", 0.80)
+        center_x_abs = getattr(self.cfg.rewards, "step_clearance_center_x_abs", 0.15)
+        y_abs = getattr(self.cfg.rewards, "step_clearance_y_abs", 0.35)
+
+        front_mask = (
+            (px >= front_x_min)
+            & (px <= front_x_max)
+            & (torch.abs(py) <= y_abs)
+        )
+        center_mask = (
+            (torch.abs(px) <= center_x_abs)
+            & (torch.abs(py) <= y_abs)
+        )
+
+        if front_mask.sum().item() == 0 or center_mask.sum().item() == 0:
+            return None
+
+        front_height = self.measured_heights[:, front_mask].max(dim=1).values
+        center_height = self.measured_heights[:, center_mask].mean(dim=1)
+
+        max_obstacle_height = getattr(self.cfg.rewards, "step_clearance_max_obstacle_height", 0.20)
+        obstacle_height = torch.clamp(front_height - center_height, min=0.0, max=max_obstacle_height)
+
+        trigger_height = getattr(self.cfg.rewards, "step_clearance_trigger_height", 0.03)
+        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+        active = (obstacle_height > trigger_height) & (self.commands[:, 0] > min_cmd_x)
+
+        if hasattr(self, "rigid_body_states") and hasattr(self, "feet_indices"):
+            foot_z = self.rigid_body_states[:, self.feet_indices, 2]
+            foot_clearance = foot_z - center_height.unsqueeze(1)
+        elif hasattr(self, "feet_body_frame_height") and torch.is_tensor(self.feet_body_frame_height):
+            foot_clearance = self.feet_body_frame_height
+        else:
+            return None
+
+        return active, obstacle_height, foot_clearance, zeros
+
     def _reward_step_clearance(self):
         """
         前方存在上台阶高度差时，鼓励轮/足抬高。
@@ -14,101 +68,49 @@ class D1HMoEDisc(D1HMoEBase):
         3. 只有当前方地形明显高于当前地面，并且命令为向前走时，这个 reward 才激活。
         """
 
-        if not getattr(self.cfg.terrain, "measure_heights", False):
+        context = self._get_step_lift_context()
+        if context is None:
             return torch.zeros(self.num_envs, device=self.device)
 
-        if not hasattr(self, "measured_heights"):
-            return torch.zeros(self.num_envs, device=self.device)
-
-        if not torch.is_tensor(self.measured_heights):
-            return torch.zeros(self.num_envs, device=self.device)
-
-        if self.measured_heights.ndim != 2:
-            return torch.zeros(self.num_envs, device=self.device)
-
-        if not hasattr(self, "height_points"):
-            return torch.zeros(self.num_envs, device=self.device)
-
-        if not hasattr(self, "commands"):
-            return torch.zeros(self.num_envs, device=self.device)
-
-        # height_points: [num_envs, num_height_points, 3]
-        # 这里取第 0 个 env 的局部采样点坐标，因为所有 env 的采样点布局相同。
-        points = self.height_points[0]
-        px = points[:, 0]
-        py = points[:, 1]
-
-        # 从 cfg.rewards 读取参数，后面只需要在 config 里调这些数。
-        front_x_min = getattr(self.cfg.rewards, "step_clearance_front_x_min", 0.20)
-        front_x_max = getattr(self.cfg.rewards, "step_clearance_front_x_max", 0.80)
-        center_x_abs = getattr(self.cfg.rewards, "step_clearance_center_x_abs", 0.15)
-        y_abs = getattr(self.cfg.rewards, "step_clearance_y_abs", 0.35)
-
-        trigger_height = getattr(self.cfg.rewards, "step_clearance_trigger_height", 0.03)
-        clearance_margin = getattr(self.cfg.rewards, "step_clearance_margin", 0.04)
-        max_obstacle_height = getattr(self.cfg.rewards, "step_clearance_max_obstacle_height", 0.20)
-        sigma = getattr(self.cfg.rewards, "step_clearance_sigma", 0.04)
-        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
-
-        # 前方区域：机器人前方 0.20~0.80 m，左右宽度 |y| <= 0.35 m。
-        front_mask = (
-            (px >= front_x_min)
-            & (px <= front_x_max)
-            & (torch.abs(py) <= y_abs)
-        )
-
-        # 当前脚下/车身中心附近区域，用于估计当前地面高度。
-        center_mask = (
-            (torch.abs(px) <= center_x_abs)
-            & (torch.abs(py) <= y_abs)
-        )
-
-        if front_mask.sum().item() == 0 or center_mask.sum().item() == 0:
-            return torch.zeros(self.num_envs, device=self.device)
-
-        front_height = self.measured_heights[:, front_mask].max(dim=1).values
-        center_height = self.measured_heights[:, center_mask].mean(dim=1)
-
-        # 前方相对当前地面的高度差。只关心上台阶，不奖励下台阶。
-        obstacle_height = torch.clamp(
-            front_height - center_height,
-            min=0.0,
-            max=max_obstacle_height,
-        )
-
-        # 只有前方确实有坎，并且命令向前走时才激活。
-        need_step = obstacle_height > trigger_height
-        forward_cmd = self.commands[:, 0] > min_cmd_x
-        active = need_step & forward_cmd
-
+        active, obstacle_height, foot_clearance, zeros = context
         if not torch.any(active):
-            return torch.zeros(self.num_envs, device=self.device)
+            return zeros
 
-        # 优先用 rigid_body_states 计算轮/足的世界 z 坐标。
-        # feet_indices 在 D1HMoEBase._create_envs() 里已经创建。
-        if hasattr(self, "rigid_body_states") and hasattr(self, "feet_indices"):
-            foot_z = self.rigid_body_states[:, self.feet_indices, 2]
-            foot_clearance = foot_z - center_height.unsqueeze(1)
-            max_foot_clearance = foot_clearance.max(dim=1).values
-
-        # 如果某些版本里没有 rigid_body_states，则退化使用 feet_body_frame_height。
-        # 这个分支主要是防止属性不存在导致训练直接报错。
-        elif hasattr(self, "feet_body_frame_height") and torch.is_tensor(self.feet_body_frame_height):
-            max_foot_clearance = self.feet_body_frame_height.max(dim=1).values
-
-        else:
-            return torch.zeros(self.num_envs, device=self.device)
+        clearance_margin = getattr(self.cfg.rewards, "step_clearance_margin", 0.04)
+        sigma = getattr(self.cfg.rewards, "step_clearance_sigma", 0.04)
 
         # 目标抬高高度 = 前方台阶高度 + 余量。
         target_clearance = obstacle_height + clearance_margin
+        max_foot_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
 
-        # 没达到目标时有误差，达到后误差为 0。
-        clearance_error = torch.clamp(
-            target_clearance - max_foot_clearance,
-            min=0.0,
-        )
+        # 原来的 exp(-error^2/sigma^2) 在没抬到目标前太稀疏。
+        # 这里加入线性进度，让“开始抬”本身也有奖励。
+        progress = torch.clamp(max_foot_clearance / torch.clamp(target_clearance, min=0.04), 0.0, 1.0)
+        clearance_error = torch.clamp(target_clearance - max_foot_clearance, min=0.0)
+        success_bonus = torch.exp(-torch.square(clearance_error / sigma))
+        reward = 0.75 * progress + 0.25 * success_bonus
 
-        reward = torch.exp(-torch.square(clearance_error / sigma))
+        return reward * active.float()
+
+    def _reward_step_lift(self):
+        """Reward reaching a useful lift height when a front step is detected."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, obstacle_height, foot_clearance, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        min_lift = getattr(self.cfg.rewards, "step_lift_min_height", 0.05)
+        margin = getattr(self.cfg.rewards, "step_lift_margin", 0.06)
+        sigma = getattr(self.cfg.rewards, "step_lift_sigma", 0.05)
+        target_lift = torch.clamp(obstacle_height + margin, min=min_lift)
+        max_lift = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+
+        lift_error = torch.clamp(target_lift - max_lift, min=0.0)
+        reward = torch.exp(-torch.square(lift_error / sigma))
 
         return reward * active.float()
 
@@ -152,8 +154,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_clearance_trigger_height = 0.03
         step_clearance_margin = 0.04
         step_clearance_max_obstacle_height = 0.20
-        step_clearance_sigma = 0.03
+        step_clearance_sigma = 0.06
         step_clearance_min_cmd_x = 0.03
+        step_lift_min_height = 0.05
+        step_lift_margin = 0.06
+        step_lift_sigma = 0.05
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             tracking_lin_vel_x = 23.0
@@ -168,7 +173,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             zero_base_vel = -1.0
             zero_yaw_rate = -1.0
             zero_wheel_vel = -0.02
-            feet_air_time = 2.0
+            feet_air_time = 0.2
             lin_vel_z = -1.0
             body_pos_to_feet_x = 0.3
             body_feet_distance_x = -1.0
@@ -176,9 +181,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             body_symmetry_y = 0.2
             body_symmetry_z = 0.0
 
-            # 新增：前方有上台阶高度差时，鼓励轮/足抬高。
-            # 第一版不要太大，先看 rew_step_clearance 是否正常出现。
-            step_clearance = 30.0
+            # 前方有上台阶高度差时，给密集的抬脚进度奖励。
+            step_clearance = 45.0
+            # 专门鼓励至少一个轮/足达到越障所需高度。
+            step_lift = 25.0
 
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
