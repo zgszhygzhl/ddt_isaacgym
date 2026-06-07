@@ -36,6 +36,9 @@ def get_residual_args():
         {"name": "--max_iterations", "type": int, "help": "Override max learning iterations."},
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Checkpoint path for the frozen base policy."},
         {"name": "--residual_alpha", "type": float, "default": 0.3, "help": "Scale factor for the residual expert mean."},
+        {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
+        {"name": "--residual_std_min", "type": float, "default": 0.02, "help": "Lower clamp for the final executed action std."},
+        {"name": "--residual_std_max", "type": float, "default": 0.8, "help": "Upper clamp for the final executed action std."},
     ]
 
     args = gymutil.parse_arguments(description="Train residual expert policy.", custom_parameters=custom_parameters)
@@ -92,6 +95,9 @@ def train(args):
         residual_actor_critic=residual_actor_critic,
         alpha=args.residual_alpha,
         freeze_base=True,
+        residual_std_scale=args.residual_std_scale,
+        min_policy_std=args.residual_std_min,
+        max_policy_std=args.residual_std_max,
     )
 
     log_dir = build_log_dir(train_cfg)
@@ -99,6 +105,8 @@ def train(args):
     print("[train_residual] base_task      =", args.base_task)
     print("[train_residual] base_ckpt      =", args.base_ckpt)
     print("[train_residual] residual_alpha =", args.residual_alpha)
+    print("[train_residual] residual_std_scale =", actor_critic.residual_std_scale)
+    print("[train_residual] residual_std_range =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
     print("[train_residual] log_dir        =", log_dir)
 
     runner = ResidualPolicyRunner(env, train_cfg_dict, actor_critic, log_dir=log_dir, device=args.rl_device)

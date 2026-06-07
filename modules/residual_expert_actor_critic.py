@@ -6,12 +6,24 @@ from torch.distributions import Normal
 class ResidualExpertActorCritic(nn.Module):
     is_recurrent = False
 
-    def __init__(self, base_actor_critic, residual_actor_critic, alpha, freeze_base=True):
+    def __init__(
+        self,
+        base_actor_critic,
+        residual_actor_critic,
+        alpha,
+        freeze_base=True,
+        residual_std_scale=None,
+        min_policy_std=0.02,
+        max_policy_std=1.0,
+    ):
         super().__init__()
         self.base_actor_critic = base_actor_critic
         self.residual_actor_critic = residual_actor_critic
         self.alpha = alpha
         self.freeze_base = freeze_base
+        self.residual_std_scale = 1.0 if residual_std_scale is None else residual_std_scale
+        self.min_policy_std = min_policy_std
+        self.max_policy_std = max_policy_std
         # self.imi_flag = getattr(self.residual_actor_critic, "imi_flag", False)
         self.imi_flag = False
         self.distribution = None
@@ -25,10 +37,18 @@ class ResidualExpertActorCritic(nn.Module):
             for parameter in self.base_actor_critic.parameters():
                 parameter.requires_grad = False
 
-    def get_std(self):
+    def get_residual_std(self):
         if hasattr(self.residual_actor_critic, "get_std"):
             return self.residual_actor_critic.get_std()
         return self.residual_actor_critic.std
+
+    def get_effective_std(self):
+        residual_std = self.get_residual_std()
+        final_std = self.residual_std_scale * residual_std
+        return torch.clamp(final_std, min=self.min_policy_std, max=self.max_policy_std)
+
+    def get_std(self):
+        return self.get_effective_std()
 
     @property
     def action_mean(self):
@@ -63,10 +83,9 @@ class ResidualExpertActorCritic(nn.Module):
         delta = self.alpha * residual_mean
         final_mean = base_mean + delta
 
-        # 关键：residual std 也要按 alpha 缩放，并限制范围
-        residual_std = self.get_std()
-        final_std = self.alpha * residual_std
-        final_std = torch.clamp(final_std, min=0.02, max=0.55)
+        # 关键：residual std 使用独立缩放系数，并限制最终执行范围
+        residual_std = self.get_residual_std()
+        final_std = self.get_effective_std()
 
         self.distribution = Normal(final_mean, final_mean * 0.0 + final_std)
 
@@ -75,13 +94,14 @@ class ResidualExpertActorCritic(nn.Module):
         self.last_residual_mean = residual_mean.detach()
         self.last_delta = delta.detach()
         self.last_final_mean = final_mean.detach()
+        self.last_residual_std = residual_std.detach()
         self.last_final_std = final_std.detach()
         self.last_saturation_ratio = (final_mean.abs() > 0.95).float().mean().detach()
 
         # 如果后面要加 residual 正则，这个不能 detach
         self.current_delta = delta
 
-    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+    def clamp_action_std(self, min_std=0.02, max_std=1.2):
         if hasattr(self.residual_actor_critic, "clamp_action_std"):
             self.residual_actor_critic.clamp_action_std(min_std, max_std)
 

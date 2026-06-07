@@ -127,8 +127,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         class ranges:
             lin_vel_x = [0.05, 0.5]
             lin_vel_y = [-0.05, 0.05]
-            ang_vel_yaw = [-0.25, 0.25]
-            heading = [-3.14, 3.14]
+            ang_vel_yaw = [-0.05, 0.05]
+            heading = [-0.14, 0.14]
 
     class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
@@ -152,14 +152,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_clearance_trigger_height = 0.03
         step_clearance_margin = 0.04
         step_clearance_max_obstacle_height = 0.20
-        step_clearance_sigma = 0.05
+        step_clearance_sigma = 0.03
         step_clearance_min_cmd_x = 0.03
 
         class scales(D1HMoEBaseCfg.rewards.scales):
-            tracking_lin_vel_x = 20.0
+            tracking_lin_vel_x = 23.0
             tracking_lin_vel_y = 5.0
             tracking_ang_vel = 18.0
-            orientation = -14.0
+            orientation = -18.0
             upward = 4.0
             collision = -10.0
             collision_hard = -15.0
@@ -178,7 +178,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # 新增：前方有上台阶高度差时，鼓励轮/足抬高。
             # 第一版不要太大，先看 rew_step_clearance 是否正常出现。
-            step_clearance = 25.0
+            step_clearance = 30.0
 
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):

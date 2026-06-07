@@ -84,6 +84,9 @@ def get_residual_play_args():
 
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Optional base checkpoint. Usually unnecessary if loading a full residual wrapper checkpoint."},
         {"name": "--residual_alpha", "type": float, "default": 0.3, "help": "Scale factor for the residual expert mean."},
+        {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
+        {"name": "--residual_std_min", "type": float, "default": 0.02, "help": "Lower clamp for the final executed action std."},
+        {"name": "--residual_std_max", "type": float, "default": 0.55, "help": "Upper clamp for the final executed action std."},
         {"name": "--max_steps", "type": int, "default": 2000, "help": "Maximum rollout steps for inference."},
 
         # Fixed command override for play.
@@ -589,6 +592,9 @@ def play(args):
         residual_actor_critic=residual_actor_critic,
         alpha=args.residual_alpha,
         freeze_base=True,
+        residual_std_scale=args.residual_std_scale,
+        min_policy_std=args.residual_std_min,
+        max_policy_std=args.residual_std_max,
     )
 
     resume_path = resolve_resume_path(train_cfg, args)
@@ -609,6 +615,8 @@ def play(args):
     print("[play_residual] checkpoint          =", resume_path)
     print("[play_residual] base_ckpt           =", args.base_ckpt)
     print("[play_residual] residual_alpha      =", args.residual_alpha)
+    print("[play_residual] residual_std_scale  =", actor_critic.residual_std_scale)
+    print("[play_residual] residual_std_range  =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
     print("[play_residual] num_envs            =", env_cfg.env.num_envs)
     print("[play_residual] enable_noise        =", args.enable_noise)
     print("[play_residual] enable_domain_rand  =", args.enable_domain_rand)

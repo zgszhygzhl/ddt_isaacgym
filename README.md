@@ -40,22 +40,22 @@ tmux attach -t d1h_train
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
-  --resume \
-  --load_run Jun06_22-30-57_residual_disc_base7400 \
-  --checkpoint 1400 \
   --headless \
   --num_envs 4096 \
   --max_iterations 4000 \
   --residual_alpha 0.3 \
-  --run_name residual_disc_base7400_resume
+  --run_name residual_disc_base7400_resume \
+  --resume \
+  --load_run Jun06_22-30-57_residual_disc_base7400 \
+  --checkpoint 1400 
 
 
 推理moe
   python scripts/play_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --load_run Jun07_12-48-36_residual_disc_base7400_resume \
-  --checkpoint 2200 \
+  --load_run Jun07_14-44-00_residual_disc_base7400_resume \
+  --checkpoint 2400 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --residual_alpha 0.3 \
   --cmd_x 0.5 \
