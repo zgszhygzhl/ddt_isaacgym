@@ -484,7 +484,10 @@ class OnConstraintPolicyRunner:
         mean_std = self.alg.actor_critic.get_std().mean()
         residual_mean_std = None
         if hasattr(self.alg.actor_critic, "get_residual_std"):
-            residual_mean_std = self.alg.actor_critic.get_residual_std().mean()
+            if hasattr(self.alg.actor_critic, "get_effective_std"):
+                residual_mean_std = self.alg.actor_critic.get_effective_std().mean()
+            else:
+                residual_mean_std = self.alg.actor_critic.get_residual_std().mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
         #mean_kl_loss,mean_recons_loss,mean_vel_recons_loss
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])

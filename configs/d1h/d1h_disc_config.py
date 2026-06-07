@@ -134,7 +134,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
-        terrain_proportions = [0.0, 0.02, 0.9, 0.05, 0.03]
+        # 先只训练上台阶，把抬腿/越阶动作学出来后再逐步加回其它离散地形。
+        # terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles]
+        terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
         step_height = [0.05, 0.2]
         step_width_range = [0.25, 0.7]
         slope = [0.0, 0.15]

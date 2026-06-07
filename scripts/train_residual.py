@@ -37,7 +37,7 @@ def get_residual_args():
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Checkpoint path for the frozen base policy."},
         {"name": "--residual_alpha", "type": float, "default": 0.3, "help": "Scale factor for the residual expert mean."},
         {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
-        {"name": "--residual_std_min", "type": float, "default": 0.02, "help": "Lower clamp for the final executed action std."},
+        {"name": "--residual_std_min", "type": float, "default": 0.5, "help": "Lower clamp for the final executed action std."},
         {"name": "--residual_std_max", "type": float, "default": 0.8, "help": "Upper clamp for the final executed action std."},
         {"name": "--reset_residual_std", "type": float, "default": None, "help": "If set, overwrite residual std after loading a resume checkpoint."},
     ]

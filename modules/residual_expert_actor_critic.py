@@ -103,12 +103,13 @@ class ResidualExpertActorCritic(nn.Module):
 
     def clamp_action_std(self, min_std=0.02, max_std=1.2):
         if hasattr(self.residual_actor_critic, "clamp_action_std"):
-            self.residual_actor_critic.clamp_action_std(min_std, max_std)
+            self.residual_actor_critic.clamp_action_std(self.min_policy_std, self.max_policy_std)
 
     def set_residual_std(self, value):
         if hasattr(self.residual_actor_critic, "std"):
             with torch.no_grad():
-                self.residual_actor_critic.std.data.fill_(value)
+                clamped_value = max(self.min_policy_std, min(value, self.max_policy_std))
+                self.residual_actor_critic.std.data.fill_(clamped_value)
 
     def act(self, obs, **kwargs):
         self.update_distribution(obs)
