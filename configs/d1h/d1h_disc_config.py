@@ -59,14 +59,7 @@ class D1HMoEDisc(D1HMoEBase):
         return active, obstacle_height, foot_clearance, zeros
 
     def _reward_step_clearance(self):
-        """
-        前方存在上台阶高度差时，鼓励轮/足抬高。
-
-        说明：
-        1. 这个 reward 使用 measured_heights，属于训练时特权信息。
-        2. measured_heights 不进入 actor 输入，只用于 reward 计算。
-        3. 只有当前方地形明显高于当前地面，并且命令为向前走时，这个 reward 才激活。
-        """
+        """Reward useful wheel/foot clearance when a front up-step is detected."""
 
         context = self._get_step_lift_context()
         if context is None:
@@ -79,21 +72,23 @@ class D1HMoEDisc(D1HMoEBase):
         clearance_margin = getattr(self.cfg.rewards, "step_clearance_margin", 0.04)
         sigma = getattr(self.cfg.rewards, "step_clearance_sigma", 0.04)
 
-        # 目标抬高高度 = 前方台阶高度 + 余量。
-        target_clearance = obstacle_height + clearance_margin
-        max_foot_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+        target_clearance = torch.clamp(obstacle_height + clearance_margin, min=0.04).unsqueeze(1)
+        positive_clearance = torch.clamp(foot_clearance, min=0.0)
 
-        # 原来的 exp(-error^2/sigma^2) 在没抬到目标前太稀疏。
-        # 这里加入线性进度，让“开始抬”本身也有奖励。
-        progress = torch.clamp(max_foot_clearance / torch.clamp(target_clearance, min=0.04), 0.0, 1.0)
-        clearance_error = torch.clamp(target_clearance - max_foot_clearance, min=0.0)
-        success_bonus = torch.exp(-torch.square(clearance_error / sigma))
-        reward = 0.75 * progress + 0.25 * success_bonus
+        # Mean progress keeps both wheels involved; max progress gives early signal
+        # when only one side has discovered the lift motion.
+        per_foot_progress = torch.clamp(positive_clearance / target_clearance, 0.0, 1.0)
+        mean_progress = per_foot_progress.mean(dim=1)
+        max_progress = per_foot_progress.max(dim=1).values
+        min_clearance = positive_clearance.min(dim=1).values
+        clearance_error = torch.clamp(target_clearance.squeeze(1) - min_clearance, min=0.0)
+        both_clear_bonus = torch.exp(-torch.square(clearance_error / sigma))
+        reward = 0.55 * mean_progress + 0.30 * max_progress + 0.15 * both_clear_bonus
 
         return reward * active.float()
 
     def _reward_step_lift(self):
-        """Reward reaching a useful lift height when a front step is detected."""
+        """Reward reaching a useful lift height while the front step is active."""
 
         context = self._get_step_lift_context()
         if context is None:
@@ -107,10 +102,11 @@ class D1HMoEDisc(D1HMoEBase):
         margin = getattr(self.cfg.rewards, "step_lift_margin", 0.06)
         sigma = getattr(self.cfg.rewards, "step_lift_sigma", 0.05)
         target_lift = torch.clamp(obstacle_height + margin, min=min_lift)
-        max_lift = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+        positive_clearance = torch.clamp(foot_clearance, min=0.0)
 
-        lift_error = torch.clamp(target_lift - max_lift, min=0.0)
-        reward = torch.exp(-torch.square(lift_error / sigma))
+        lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
+        per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
+        reward = 0.70 * per_foot_lift.mean(dim=1) + 0.30 * per_foot_lift.max(dim=1).values
 
         return reward * active.float()
 
@@ -148,97 +144,165 @@ class D1HMoEDisc(D1HMoEBase):
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
+        # Keep command curriculum, but make the initial task a straight stair climb.
         curriculum = True
-
-        max_curriculum_x = 1.2
-        max_curriculum_x_back = 0.2
-        max_curriculum_y = 0.10
-        max_curriculum_yaw = 0.30
-
-        zero_command_ratio = 0.02
+        max_curriculum_x = 0.8
+        max_curriculum_x_back = 0.0
+        max_curriculum_y = 0.0
+        max_curriculum_yaw = 0.0
+        resampling_time = 10.0
+        heading_command = True
+        zero_command_ratio = 0.0
+        startup_freeze_time = 0.0
 
         class ranges:
-            lin_vel_x = [0.05, 0.5]
-            lin_vel_y = [-0.05, 0.05]
-            ang_vel_yaw = [-0.05, 0.05]
-            heading = [-0.14, 0.14]
+            # Values below 0.2 are zeroed by the base command sampler.
+            lin_vel_x = [0.25, 0.45]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
+            heading = [0.0, 0.0]
 
     class terrain(D1HMoEBaseCfg.terrain):
+        # Terrain curriculum still provides gradual generalization across levels.
         curriculum = True
-        # 先只训练上台阶，把抬腿/越阶动作学出来后再逐步加回其它离散地形。
-        # terrain order used here: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles]
+        max_init_terrain_level = 1
+        # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
-        step_height = [0.05, 0.2]
-        step_width_range = [0.25, 0.7]
-        slope = [0.0, 0.15]
-
-        # 越小，越容易把陡峭边缘修正成竖直面，台阶边缘更硬。
+        step_height = [0.04, 0.20]
+        step_width_range = [0.30, 0.55]
+        slope = [0.0, 0.08]
         slope_treshold = 0.3
 
     class rewards(D1HMoEBaseCfg.rewards):
-        # step clearance reward parameters
-        # 前方检测区域
-        step_clearance_front_x_min = 0.1
-        step_clearance_front_x_max = 0.80
-        step_clearance_center_x_abs = 0.15
-        step_clearance_y_abs = 0.35
+        only_positive_rewards = False
+        tracking_sigma = 0.07
+        distance_sigma = 0.08
+        soft_dof_pos_limit = 0.98
+        soft_dof_vel_limit = 0.98
+        soft_torque_limit = 0.98
+        base_height_target = 0.45
+        base_height_scale = 0.05
+        base_height_deadband = 0.01
 
-        # 触发和目标高度
-        step_clearance_trigger_height = 0.03
-        step_clearance_margin = 0.04
-        step_clearance_max_obstacle_height = 0.20
-        step_clearance_sigma = 0.06
-        step_clearance_min_cmd_x = 0.03
-        step_lift_min_height = 0.05
-        step_lift_margin = 0.06
-        step_lift_sigma = 0.05
-        step_stall_min_speed = 0.08
+        # Front height scan window used only by the stair rewards.
+        step_clearance_front_x_min = 0.05
+        step_clearance_front_x_max = 0.75
+        step_clearance_center_x_abs = 0.15
+        step_clearance_y_abs = 0.45
+
+        # Clearance target = detected step height + margin.
+        step_clearance_trigger_height = 0.025
+        step_clearance_margin = 0.08
+        step_clearance_max_obstacle_height = 0.24
+        step_clearance_sigma = 0.08
+        step_clearance_min_cmd_x = 0.08
+        step_lift_min_height = 0.08
+        step_lift_margin = 0.09
+        step_lift_sigma = 0.07
+        step_stall_min_speed = 0.12
 
         class scales(D1HMoEBaseCfg.rewards.scales):
-            tracking_lin_vel_x = 28.0
-            tracking_lin_vel_y = 8.0
-            tracking_ang_vel = 22.0
-            orientation = -18.0
-            upward = 4.0
-            collision = -10.0
-            collision_hard = -15.0
-            action_rate = -0.03
-            stand_still = -0.2
-            zero_base_vel = -1.0
-            zero_yaw_rate = -1.0
-            zero_wheel_vel = -0.02
-            feet_air_time = 10.0
-            lin_vel_z = -1.0
-            body_pos_to_feet_x = 0.3
-            body_feet_distance_x = -1.0
-            body_feet_distance_y = -5.0
-            body_symmetry_y = 0.2
+            # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
+            tracking_lin_vel = 0.0
+            # Keep forward tracking useful but below the stair-specific rewards.
+            tracking_lin_vel_x = 12.0
+            # Reward holding the lateral velocity near zero.
+            tracking_lin_vel_y = 4.0
+            # Mild yaw stabilization; heading is fixed to zero.
+            tracking_ang_vel = 6.0
+            heading = 0.0
+
+            # Stability guardrails. They should prevent garbage motion, not dominate climbing.
+            orientation = -10.0
+            upward = 2.0
+            ang_vel_xy = -0.08
+            base_height = -1.0
+            lin_vel_z = -0.25
+
+            # Failure/contact penalties.
+            termination = -120.0
+            collision = -8.0
+            collision_hard = -20.0
+            collision_head = 0.0
+
+            # Effort and smoothness are intentionally light during skill acquisition.
+            torques = 0.0
+            powers = -1.0e-5
+            dof_acc = -1.0e-7
+            action_rate = -0.02
+            action_smoothness = 0.0
+            dof_pos_limits = 0.0
+            dof_vel_limits = 0.0
+            torque_limits = 0.0
+
+            # Zero-command rewards are disabled because this expert never samples zero commands.
+            stand_still = 0.0
+            zero_base_vel = 0.0
+            zero_yaw_rate = 0.0
+            zero_wheel_vel = 0.0
+
+            # Air-time is not a stair-success signal for this wheel-legged robot.
+            feet_air_time = 0.0
+            feet_contact_forces = 0.0
+            feet_stumble = 0.0
+            stumble = 0.0
+            no_jump = 0.0
+
+            # Body geometry priors are weak; strong values can block the step-up posture.
+            body_pos_to_feet_x = 0.2
+            body_feet_distance_x = -0.3
+            body_feet_distance_y = -1.0
+            body_symmetry_y = 0.1
             body_symmetry_z = 0.0
 
-            # 前方有上台阶高度差时，给密集的抬脚进度奖励。
-            step_clearance = 45.0
-            # 专门鼓励至少一个轮/足达到越障所需高度。
-            step_lift = 25.0
-            # 前方有台阶时，不能停在台阶边缘等死。
-            step_progress = 8.0
-            step_stall = -12.0
+            # Main stair-up objective.
+            step_clearance = 40.0
+            step_lift = 24.0
+            step_progress = 18.0
+            step_stall = -20.0
+
+    class costs(D1HMoEBaseCfg.costs):
+        class scales(D1HMoEBaseCfg.costs.scales):
+            # Keep constraints visible, but less suppressive than the base setting.
+            pos_limit = 0.1
+            torque_limit = 0.1
+            dof_vel_limits = 0.1
+
+        class d_values(D1HMoEBaseCfg.costs.d_values):
+            # Keep the original zero-budget interpretation explicit.
+            pos_limit = 0.0
+            torque_limit = 0.0
+            dof_vel_limits = 0.0
 
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
-        # 防止 residual 训练时动作 std 被 entropy bonus 推大。
         entropy_coef = 0.0
-        # 约束 residual 只做必要修正，避免为了越障把 base 的速度跟踪破坏掉。
-        residual_l2_coef = 0.02
+        residual_l2_coef = 0.0
+        learning_rate = 1.0e-3
+        schedule = "adaptive"
+        desired_kl = 0.02
+        gamma = 0.995
+        lam = 0.95
+        clip_param = 0.2
+        max_grad_norm = 1.0
+        num_learning_epochs = 5
+        num_mini_batches = 4
+        value_loss_coef = 1.0
+        cost_value_loss_coef = 0.05
+        cost_viol_loss_coef = 0.03
 
     class policy(D1HMoEBaseCfgPPO.policy):
-        actor_hidden_dims = [256, 128, 64]
-        barlow_actor_hidden_dims = [256, 128, 64]
+        actor_hidden_dims = [512, 256, 128]
+        barlow_actor_hidden_dims = [512, 256, 128]
         barlow_mlp_encoder_dims = [128, 64]
         barlow_latent_dim = 16
         barlow_obs_encoder_dims = [128, 64]
-        critic_hidden_dims = [256, 128, 64]
-        init_noise_std = 0.8
+        critic_hidden_dims = [512, 256, 128]
+        init_noise_std = 0.7
 
     class runner(D1HMoEBaseCfgPPO.runner):
-        experiment_name = 'd1h_moe_disc'
+        experiment_name = "d1h_moe_disc"
+        max_iterations = 20000
+        num_steps_per_env = 32
+        save_interval = 200
