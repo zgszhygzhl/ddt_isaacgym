@@ -349,9 +349,9 @@ class ActorCriticRMA(nn.Module):
     
     def get_std(self):
         # 避免 std 被训练成负数或爆炸
-        return torch.clamp(self.std, min=0.02, max=0.6)
+        return torch.clamp(self.std, min=0.02, max=1.2)
 
-    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+    def clamp_action_std(self, min_std=0.02, max_std=1.2):
         if hasattr(self, "std"):
             with torch.no_grad():
                 self.std.data.clamp_(min_std, max_std)
@@ -580,9 +580,9 @@ class ActorCriticBarlowTwins(nn.Module):
     
     def get_std(self):
         # 避免 std 被训练成负数或爆炸
-        return torch.clamp(self.std, min=0.02, max=0.6)
+        return torch.clamp(self.std, min=0.02, max=1.2)
 
-    def clamp_action_std(self, min_std=0.02, max_std=0.5):
+    def clamp_action_std(self, min_std=0.02, max_std=1.2):
         if hasattr(self, "std"):
             with torch.no_grad():
                 self.std.data.clamp_(min_std, max_std)

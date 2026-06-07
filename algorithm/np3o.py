@@ -272,7 +272,7 @@ class NP3O:
                 self.optimizer.step()
 
                 if hasattr(self.actor_critic, "clamp_action_std"):
-                    self.actor_critic.clamp_action_std(min_std=0.02, max_std=0.6)
+                    self.actor_critic.clamp_action_std(min_std=0.02, max_std=1.2)
 
                 mean_value_loss += value_loss.item()
                 mean_cost_value_loss += cost_value_loss.item()

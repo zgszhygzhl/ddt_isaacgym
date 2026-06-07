@@ -86,6 +86,15 @@ def get_residual_play_args():
         {"name": "--residual_alpha", "type": float, "default": 0.3, "help": "Scale factor for the residual expert mean."},
         {"name": "--max_steps", "type": int, "default": 2000, "help": "Maximum rollout steps for inference."},
 
+        # Fixed command override for play.
+        # 默认 None 表示不覆盖原配置。
+        {"name": "--cmd_x", "type": float, "default": None, "help": "Fixed target linear velocity x during inference."},
+        {"name": "--cmd_y", "type": float, "default": None, "help": "Fixed target linear velocity y during inference. If any command override is used and this is not set, it defaults to 0.0."},
+        {"name": "--cmd_yaw", "type": float, "default": None, "help": "Fixed target yaw rate during inference. Used when --command_mode yaw. If any command override is used and this is not set, it defaults to 0.0."},
+        {"name": "--cmd_heading", "type": float, "default": None, "help": "Fixed target heading during inference. Used when --command_mode heading. If not set, defaults to 0.0."},
+        {"name": "--command_mode", "type": str, "default": "yaw", "help": "Command mode for play override: yaw or heading."},
+        {"name": "--cmd_resampling_time", "type": float, "default": 1e9, "help": "Command resampling time during inference when command override is used."},
+
         {"name": "--enable_noise", "action": "store_true", "default": False, "help": "Enable observation noise during inference."},
         {"name": "--enable_domain_rand", "action": "store_true", "default": False, "help": "Enable pushes, disturbances, and domain randomization during inference."},
 
@@ -150,6 +159,143 @@ def parse_record_env_ids(record_env_ids):
     return env_ids
 
 
+def has_command_override(args):
+    return (
+        args.cmd_x is not None
+        or args.cmd_y is not None
+        or args.cmd_yaw is not None
+        or args.cmd_heading is not None
+    )
+
+
+def get_command_mode(args):
+    command_mode = str(args.command_mode).strip().lower()
+    if command_mode not in ("yaw", "heading"):
+        raise ValueError(f"--command_mode must be 'yaw' or 'heading', got: {args.command_mode}")
+    return command_mode
+
+
+def apply_fixed_command_cfg(env_cfg, args):
+    """
+    在创建环境前固定 command range。
+    这样 env.reset() / resample_commands() 采样到的就是固定目标速度，
+    策略观测里的 command 和真实 env.commands 保持一致。
+    """
+    if not has_command_override(args):
+        return env_cfg
+
+    command_mode = get_command_mode(args)
+
+    if not hasattr(env_cfg, "commands") or not hasattr(env_cfg.commands, "ranges"):
+        raise AttributeError("env_cfg.commands.ranges is required for command override.")
+
+    # 推理时关闭命令 curriculum、zero command 和启动冻结，避免你设置了速度但环境又改回 0。
+    if hasattr(env_cfg.commands, "curriculum"):
+        env_cfg.commands.curriculum = False
+
+    if hasattr(env_cfg.commands, "zero_command_ratio"):
+        env_cfg.commands.zero_command_ratio = 0.0
+
+    if hasattr(env_cfg.commands, "startup_freeze_time"):
+        env_cfg.commands.startup_freeze_time = 0.0
+
+    if hasattr(env_cfg.commands, "resampling_time"):
+        env_cfg.commands.resampling_time = args.cmd_resampling_time
+
+    # 如果用户只设置了 cmd_x，则默认 y/yaw 为 0，避免还随机横移或随机转向。
+    if args.cmd_x is not None:
+        env_cfg.commands.ranges.lin_vel_x = [args.cmd_x, args.cmd_x]
+
+    cmd_y = args.cmd_y
+    if cmd_y is None:
+        cmd_y = 0.0
+    env_cfg.commands.ranges.lin_vel_y = [cmd_y, cmd_y]
+
+    if command_mode == "yaw":
+        if hasattr(env_cfg.commands, "heading_command"):
+            env_cfg.commands.heading_command = False
+
+        cmd_yaw = args.cmd_yaw
+        if cmd_yaw is None:
+            cmd_yaw = 0.0
+        env_cfg.commands.ranges.ang_vel_yaw = [cmd_yaw, cmd_yaw]
+
+    else:
+        if hasattr(env_cfg.commands, "heading_command"):
+            env_cfg.commands.heading_command = True
+
+        cmd_heading = args.cmd_heading
+        if cmd_heading is None:
+            cmd_heading = 0.0
+        env_cfg.commands.ranges.heading = [cmd_heading, cmd_heading]
+
+    return env_cfg
+
+
+def force_env_commands(env, args):
+    """
+    在 env.reset() 后立即把 env.commands 改成固定值。
+    这一步主要保证初始 obs 之前 command 已经正确。
+    后续 rollout 中因为 command ranges 已经固定，通常不需要每步强行覆盖。
+    """
+    if not has_command_override(args):
+        return
+
+    if not hasattr(env, "commands"):
+        return
+
+    command_mode = get_command_mode(args)
+    device = env.commands.device
+
+    if args.cmd_x is not None:
+        env.commands[:, 0] = float(args.cmd_x)
+
+    cmd_y = args.cmd_y
+    if cmd_y is None:
+        cmd_y = 0.0
+    if env.commands.shape[1] > 1:
+        env.commands[:, 1] = float(cmd_y)
+
+    if command_mode == "yaw":
+        cmd_yaw = args.cmd_yaw
+        if cmd_yaw is None:
+            cmd_yaw = 0.0
+        if env.commands.shape[1] > 2:
+            env.commands[:, 2] = float(cmd_yaw)
+
+        if env.commands.shape[1] > 3:
+            # yaw-rate 模式下 heading 不作为控制目标；这里置 0 只是为了日志清楚。
+            env.commands[:, 3] = 0.0
+
+    else:
+        cmd_heading = args.cmd_heading
+        if cmd_heading is None:
+            cmd_heading = 0.0
+
+        if env.commands.shape[1] > 3:
+            env.commands[:, 3] = float(cmd_heading)
+
+        # heading 模式下，commands[:, 2] 通常由环境根据 heading error 生成。
+        # 这里手动初始化一次，保证第一帧 obs 不会用到旧 yaw command。
+        if env.commands.shape[1] > 2 and hasattr(env, "base_quat"):
+            _, _, heading = get_euler_xyz(env.base_quat)
+            heading = wrap_to_pi(heading)
+
+            target_heading = torch.ones_like(heading, device=device) * float(cmd_heading)
+
+            heading_kp = 1.0
+            max_yaw_rate = 1.0
+            if hasattr(env.cfg, "commands"):
+                heading_kp = getattr(env.cfg.commands, "heading_kp", heading_kp)
+                max_yaw_rate = getattr(env.cfg.commands, "max_yaw_rate", max_yaw_rate)
+
+            env.commands[:, 2] = torch.clamp(
+                heading_kp * wrap_to_pi(target_heading - heading),
+                -max_yaw_rate,
+                max_yaw_rate,
+            )
+
+
 def prepare_env_cfg(env_cfg, args):
     explicit_env_ids = parse_record_env_ids(args.record_env_ids)
 
@@ -181,6 +327,8 @@ def prepare_env_cfg(env_cfg, args):
         ]:
             if hasattr(env_cfg.domain_rand, attr_name):
                 setattr(env_cfg.domain_rand, attr_name, False)
+
+    env_cfg = apply_fixed_command_cfg(env_cfg, args)
 
     return env_cfg
 
@@ -390,11 +538,35 @@ def log_action_decomposition(logger_data, actor_critic, robot_index):
         logger_data["final_action_0"] = actor_critic.last_final_mean[robot_index, 0].item()
 
 
+def print_command_config(env_cfg, args):
+    print("[play_residual] command_override    =", has_command_override(args))
+    print("[play_residual] command_mode        =", args.command_mode)
+
+    if hasattr(env_cfg, "commands") and hasattr(env_cfg.commands, "ranges"):
+        print("[play_residual] cmd range x         =", env_cfg.commands.ranges.lin_vel_x)
+        print("[play_residual] cmd range y         =", env_cfg.commands.ranges.lin_vel_y)
+        print("[play_residual] cmd range yaw       =", env_cfg.commands.ranges.ang_vel_yaw)
+        if hasattr(env_cfg.commands.ranges, "heading"):
+            print("[play_residual] cmd range heading   =", env_cfg.commands.ranges.heading)
+
+    if hasattr(env_cfg, "commands"):
+        if hasattr(env_cfg.commands, "heading_command"):
+            print("[play_residual] heading_command     =", env_cfg.commands.heading_command)
+        if hasattr(env_cfg.commands, "resampling_time"):
+            print("[play_residual] resampling_time     =", env_cfg.commands.resampling_time)
+        if hasattr(env_cfg.commands, "zero_command_ratio"):
+            print("[play_residual] zero_command_ratio  =", env_cfg.commands.zero_command_ratio)
+        if hasattr(env_cfg.commands, "startup_freeze_time"):
+            print("[play_residual] startup_freeze_time =", env_cfg.commands.startup_freeze_time)
+
+
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     env_cfg = prepare_env_cfg(env_cfg, args)
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+
     env.reset()
+    force_env_commands(env, args)
     obs = env.get_observations()
 
     _, base_train_cfg = task_registry.get_cfgs(args.base_task)
@@ -444,6 +616,7 @@ def play(args):
     print("[play_residual] n_proprio           =", env.cfg.env.n_proprio)
     print("[play_residual] actor_obs_dim       =", actor_critic.base_actor_critic.num_prop - 3)
     print("[play_residual] history_len         =", actor_critic.base_actor_critic.num_hist)
+    print_command_config(env_cfg, args)
 
     if len(missing_keys) > 0:
         print("[play_residual] missing_keys        =", missing_keys)

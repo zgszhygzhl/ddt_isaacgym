@@ -36,29 +36,32 @@ tmux ls
 tmux attach -t d1h_train
 
 训练moe专家
-python scripts/train_residual.py \
+  python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
+  --resume \
+  --load_run Jun06_22-30-57_residual_disc_base7400 \
+  --checkpoint 1400 \
   --headless \
   --num_envs 4096 \
-  --max_iterations 8000 \
+  --max_iterations 4000 \
   --residual_alpha 0.3 \
-  --run_name residual_disc_base7400
+  --run_name residual_disc_base7400_resume
 
 
 推理moe
-python scripts/play_residual.py \
+  python scripts/play_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --load_run Jun06_18-35-20_residual_disc_base7400 \
-  --checkpoint 3000 \
-  --num_envs 8 \
-  --record_num_envs 4 \
-  --mosaic_cols 2 \
+  --load_run Jun07_12-48-36_residual_disc_base7400_resume \
+  --checkpoint 2200 \
+  --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --residual_alpha 0.3 \
-  --max_steps 1000 \
-  --disable_export
+  --cmd_x 0.5 \
+  --cmd_y 0.0 \
+  --cmd_yaw 0.0 \
+  --command_mode yaw
 
 
 ### Installation ###

@@ -12,7 +12,8 @@ class ResidualExpertActorCritic(nn.Module):
         self.residual_actor_critic = residual_actor_critic
         self.alpha = alpha
         self.freeze_base = freeze_base
-        self.imi_flag = getattr(self.residual_actor_critic, "imi_flag", False)
+        # self.imi_flag = getattr(self.residual_actor_critic, "imi_flag", False)
+        self.imi_flag = False
         self.distribution = None
 
         self.last_base_mean = None
@@ -65,7 +66,7 @@ class ResidualExpertActorCritic(nn.Module):
         # 关键：residual std 也要按 alpha 缩放，并限制范围
         residual_std = self.get_std()
         final_std = self.alpha * residual_std
-        final_std = torch.clamp(final_std, min=0.02, max=0.3)
+        final_std = torch.clamp(final_std, min=0.02, max=0.55)
 
         self.distribution = Normal(final_mean, final_mean * 0.0 + final_std)
 
@@ -79,7 +80,7 @@ class ResidualExpertActorCritic(nn.Module):
 
         # 如果后面要加 residual 正则，这个不能 detach
         self.current_delta = delta
-        
+
     def clamp_action_std(self, min_std=0.02, max_std=0.5):
         if hasattr(self.residual_actor_critic, "clamp_action_std"):
             self.residual_actor_critic.clamp_action_std(min_std, max_std)
