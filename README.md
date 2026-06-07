@@ -55,7 +55,7 @@ tmux attach -t d1h_train
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --load_run Jun07_14-44-00_residual_disc_base7400_resume \
-  --checkpoint 2400 \
+  --checkpoint 3200 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --residual_alpha 0.3 \
   --cmd_x 0.5 \

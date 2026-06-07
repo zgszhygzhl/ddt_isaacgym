@@ -132,7 +132,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
-        terrain_proportions = [0.0, 0.02, 0.8, 0.15, 0.03]
+        terrain_proportions = [0.0, 0.02, 0.9, 0.05, 0.03]
         step_height = [0.05, 0.2]
         step_width_range = [0.25, 0.7]
         slope = [0.0, 0.15]
