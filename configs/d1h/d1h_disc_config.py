@@ -114,6 +114,37 @@ class D1HMoEDisc(D1HMoEBase):
 
         return reward * active.float()
 
+    def _reward_step_progress(self):
+        """Reward forward progress when a front step is detected."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, _, _, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
+        progress = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
+        return progress * active.float()
+
+    def _reward_step_stall(self):
+        """Penalize stopping at the step edge instead of attempting to climb."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, _, _, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
+        stalled = self.base_lin_vel[:, 0] < min_speed
+        return (active & stalled).float()
+
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
@@ -135,7 +166,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class terrain(D1HMoEBaseCfg.terrain):
         curriculum = True
         # 先只训练上台阶，把抬腿/越阶动作学出来后再逐步加回其它离散地形。
-        # terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles]
+        # terrain order used here: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles]
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
         step_height = [0.05, 0.2]
         step_width_range = [0.25, 0.7]
@@ -161,6 +192,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_min_height = 0.05
         step_lift_margin = 0.06
         step_lift_sigma = 0.05
+        step_stall_min_speed = 0.08
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             tracking_lin_vel_x = 28.0
@@ -187,6 +219,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_clearance = 45.0
             # 专门鼓励至少一个轮/足达到越障所需高度。
             step_lift = 25.0
+            # 前方有台阶时，不能停在台阶边缘等死。
+            step_progress = 8.0
+            step_stall = -12.0
 
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
@@ -194,7 +229,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         # 防止 residual 训练时动作 std 被 entropy bonus 推大。
         entropy_coef = 0.0
         # 约束 residual 只做必要修正，避免为了越障把 base 的速度跟踪破坏掉。
-        residual_l2_coef = 0.05
+        residual_l2_coef = 0.02
 
     class policy(D1HMoEBaseCfgPPO.policy):
         actor_hidden_dims = [256, 128, 64]
