@@ -30,6 +30,7 @@ class NP3O:
                  device='cpu',
                  dagger_update_freq=20,
                  priv_reg_coef_schedual = [0, 0, 0],
+                 residual_l2_coef=0.0,
                  **kwargs
                  ):
 
@@ -72,6 +73,7 @@ class NP3O:
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         self.k_value = k_value
+        self.residual_l2_coef = residual_l2_coef
 
         self.substeps = 1
 
@@ -243,13 +245,18 @@ class NP3O:
                 main_loss = surrogate_loss + self.cost_viol_loss_coef * viol_loss 
                 combine_value_loss = self.cost_value_loss_coef * cost_value_loss + self.value_loss_coef * value_loss
                 entropy_loss = - self.entropy_coef * entropy_batch.mean()
+                residual_l2_loss = 0.0
+                if self.residual_l2_coef > 0.0 and hasattr(self.actor_critic, "current_delta"):
+                    residual_l2_loss = self.residual_l2_coef * torch.mean(
+                        torch.sum(torch.square(self.actor_critic.current_delta), dim=-1)
+                    )
 
                 if self.imi_flag:
                     imitation_loss = self.actor_critic.imitation_learning_loss(obs_batch,self.imi_weight)
 
-                    loss = main_loss + combine_value_loss + entropy_loss + imitation_loss
+                    loss = main_loss + combine_value_loss + entropy_loss + imitation_loss + residual_l2_loss
                 else:
-                    loss = main_loss + combine_value_loss + entropy_loss
+                    loss = main_loss + combine_value_loss + entropy_loss + residual_l2_loss
 
                 # loss = main_loss + combine_value_loss + entropy_loss
 

@@ -9,7 +9,7 @@ from utils import get_load_path
 
 
 class ResidualPolicyRunner(OnConstraintPolicyRunner):
-    def __init__(self, env, train_cfg, actor_critic, log_dir=None, device="cpu"):
+    def __init__(self, env, train_cfg, actor_critic, log_dir=None, device="cpu", reset_residual_std=None):
         self.cfg = train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
@@ -31,6 +31,12 @@ class ResidualPolicyRunner(OnConstraintPolicyRunner):
         self.alg = NP3O(actor_critic, device=self.device, **self.alg_cfg)
         if checkpoint_dict is not None and "optimizer_state_dict" in checkpoint_dict:
             self.alg.optimizer.load_state_dict(checkpoint_dict["optimizer_state_dict"])
+
+        if reset_residual_std is not None:
+            if not hasattr(actor_critic, "set_residual_std"):
+                raise AttributeError("actor_critic does not support resetting residual std")
+            actor_critic.set_residual_std(reset_residual_std)
+            print("[ResidualPolicyRunner] reset residual std to:", reset_residual_std)
 
         if checkpoint_dict is not None:
             checkpoint_iter = checkpoint_dict.get("iter")

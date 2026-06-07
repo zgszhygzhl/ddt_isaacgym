@@ -161,9 +161,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_sigma = 0.05
 
         class scales(D1HMoEBaseCfg.rewards.scales):
-            tracking_lin_vel_x = 23.0
-            tracking_lin_vel_y = 5.0
-            tracking_ang_vel = 18.0
+            tracking_lin_vel_x = 28.0
+            tracking_lin_vel_y = 8.0
+            tracking_ang_vel = 22.0
             orientation = -18.0
             upward = 4.0
             collision = -10.0
@@ -191,6 +191,8 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         # 防止 residual 训练时动作 std 被 entropy bonus 推大。
         entropy_coef = 0.0
+        # 约束 residual 只做必要修正，避免为了越障把 base 的速度跟踪破坏掉。
+        residual_l2_coef = 0.05
 
     class policy(D1HMoEBaseCfgPPO.policy):
         actor_hidden_dims = [256, 128, 64]

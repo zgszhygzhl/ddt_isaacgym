@@ -39,6 +39,7 @@ def get_residual_args():
         {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
         {"name": "--residual_std_min", "type": float, "default": 0.02, "help": "Lower clamp for the final executed action std."},
         {"name": "--residual_std_max", "type": float, "default": 0.8, "help": "Upper clamp for the final executed action std."},
+        {"name": "--reset_residual_std", "type": float, "default": None, "help": "If set, overwrite residual std after loading a resume checkpoint."},
     ]
 
     args = gymutil.parse_arguments(description="Train residual expert policy.", custom_parameters=custom_parameters)
@@ -107,9 +108,17 @@ def train(args):
     print("[train_residual] residual_alpha =", args.residual_alpha)
     print("[train_residual] residual_std_scale =", actor_critic.residual_std_scale)
     print("[train_residual] residual_std_range =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
+    print("[train_residual] reset_residual_std =", args.reset_residual_std)
     print("[train_residual] log_dir        =", log_dir)
 
-    runner = ResidualPolicyRunner(env, train_cfg_dict, actor_critic, log_dir=log_dir, device=args.rl_device)
+    runner = ResidualPolicyRunner(
+        env,
+        train_cfg_dict,
+        actor_critic,
+        log_dir=log_dir,
+        device=args.rl_device,
+        reset_residual_std=args.reset_residual_std,
+    )
     runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 
