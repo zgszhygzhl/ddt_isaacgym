@@ -207,7 +207,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             zero_base_vel = -1.0
             zero_yaw_rate = -1.0
             zero_wheel_vel = -0.02
-            feet_air_time = 0.2
+            feet_air_time = 10.0
             lin_vel_z = -1.0
             body_pos_to_feet_x = 0.3
             body_feet_distance_x = -1.0
