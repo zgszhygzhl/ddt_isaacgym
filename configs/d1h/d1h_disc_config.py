@@ -288,7 +288,7 @@ class D1HMoEDisc(D1HMoEBase):
         cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
         forward_score = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
 
-        reward = 0.60 * lift_progress + 0.25 * unload_score + 0.15 * forward_score
+        reward = 0.70 * lift_progress + 0.05 * unload_score + 0.25 * forward_score
         return reward * active.float() * recent_contact.float() * self._get_stair_reward_gate()
 
     def _reward_step_bump(self):
@@ -435,7 +435,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
             # Keep forward tracking useful, but do not let it reward hard bumping.
-            tracking_lin_vel_x = 12.0
+            tracking_lin_vel_x = 20.0
             # Stronger lateral/yaw terms because the current failure mode turns and falls.
             tracking_lin_vel_y = 10.0
             tracking_ang_vel = 18.0
@@ -445,7 +445,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             orientation = -22.0
             upward = 2.0
             ang_vel_xy = -0.20
-            base_height = -5.0
+            base_height = -3.0
             lin_vel_z = -1.0
 
             # Failure/contact penalties.
@@ -487,10 +487,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective.
             step_clearance = 20.0
             step_lift = 28.0
-            step_pre_lift = 12.0
-            step_reactive_lift = 45.0
-            step_progress = 7.0
-            step_stall = -4.0
+            step_pre_lift = 6.0
+            step_reactive_lift = 30.0
+            step_progress = 13.0
+            step_stall = -8.0
             step_bump = -70.0
 
     class normalization(D1HMoEBaseCfg.normalization):
