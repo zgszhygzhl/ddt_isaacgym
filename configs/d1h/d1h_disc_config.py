@@ -4,6 +4,20 @@ from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
 class D1HMoEDisc(D1HMoEBase):
+    def _init_buffers(self):
+        super()._init_buffers()
+        self.step_contact_timer = torch.zeros(self.num_envs, device=self.device)
+        self.step_jam_time = torch.zeros(self.num_envs, device=self.device)
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+        self.step_contact_timer[env_ids] = 0.0
+        self.step_jam_time[env_ids] = 0.0
+
+    def _post_physics_step_callback(self):
+        super()._post_physics_step_callback()
+        self._update_step_contact_state()
+
     def _update_terrain_curriculum(self, env_ids):
         """Use a stair-specific curriculum instead of pure full-terrain distance."""
         if not self.init_done:
@@ -81,8 +95,8 @@ class D1HMoEDisc(D1HMoEBase):
 
         return active, obstacle_height, foot_clearance, zeros
 
-    def _get_stair_reward_gate(self):
-        """Gate stair rewards to upright, non-colliding attempts."""
+    def _get_stair_posture_gate(self):
+        """Gate stair shaping to attempts that are still physically meaningful."""
         upright_score = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
         upright_min = getattr(self.cfg.rewards, "stair_gate_upright_min", 0.70)
         upright_gate = torch.clamp((upright_score - upright_min) / (1.0 - upright_min), 0.0, 1.0)
@@ -91,6 +105,12 @@ class D1HMoEDisc(D1HMoEBase):
         min_height = getattr(self.cfg.rewards, "stair_gate_base_height_min", 0.28)
         full_height = getattr(self.cfg.rewards, "stair_gate_base_height_full", 0.40)
         height_gate = torch.clamp((base_height - min_height) / max(full_height - min_height, 1e-6), 0.0, 1.0)
+
+        return upright_gate * height_gate
+
+    def _get_stair_reward_gate(self):
+        """Gate positive stair rewards to upright, non-colliding attempts."""
+        posture_gate = self._get_stair_posture_gate()
 
         contact_gate = torch.ones(self.num_envs, device=self.device)
         if hasattr(self, "contact_forces") and hasattr(self, "penalised_contact_indices"):
@@ -102,12 +122,54 @@ class D1HMoEDisc(D1HMoEBase):
                 )
                 contact_gate = (~bad_contact).float()
 
-        return upright_gate * height_gate * contact_gate
+        return posture_gate * contact_gate
 
     def _get_foot_contact_norm(self):
         if not hasattr(self, "contact_forces") or not hasattr(self, "feet_indices"):
             return None
         return torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+
+    def _get_step_blocking_signal(self):
+        context = self._get_step_lift_context()
+        contact_norm = self._get_foot_contact_norm()
+        if context is None or contact_norm is None:
+            return None
+
+        active, obstacle_height, foot_clearance, zeros = context
+        margin = getattr(self.cfg.rewards, "step_block_clearance_margin", 0.04)
+        target_clearance = torch.clamp(obstacle_height + margin, min=0.04)
+        max_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+        low_clearance = torch.clamp(
+            (target_clearance - max_clearance) / torch.clamp(target_clearance, min=0.04),
+            0.0,
+            1.0,
+        )
+        max_contact = contact_norm.max(dim=1).values
+        return active, obstacle_height, foot_clearance, max_contact, low_clearance, zeros
+
+    def _update_step_contact_state(self):
+        signal = self._get_step_blocking_signal()
+        if signal is None:
+            self.step_contact_timer.zero_()
+            self.step_jam_time.zero_()
+            return
+
+        active, _, _, max_contact, low_clearance, _ = signal
+        contact_force = getattr(self.cfg.rewards, "step_contact_force_threshold", 80.0)
+        jam_force = getattr(self.cfg.rewards, "step_jam_force_threshold", 280.0)
+        jam_clearance = getattr(self.cfg.rewards, "step_jam_clearance_ratio", 0.45)
+        jam_speed = getattr(self.cfg.rewards, "step_jam_min_speed", 0.08)
+        contact_memory = getattr(self.cfg.rewards, "step_contact_memory_time", 0.25)
+
+        step_contact = active & (max_contact > contact_force)
+        jammed = active & (max_contact > jam_force) & (low_clearance > jam_clearance) & (self.base_lin_vel[:, 0] < jam_speed)
+
+        self.step_contact_timer = torch.where(
+            step_contact,
+            torch.full_like(self.step_contact_timer, contact_memory),
+            torch.clamp(self.step_contact_timer - self.dt, min=0.0),
+        )
+        self.step_jam_time = torch.where(jammed, self.step_jam_time + self.dt, torch.zeros_like(self.step_jam_time))
 
     def _reward_step_clearance(self):
         """Reward useful wheel/foot clearance when a front up-step is detected."""
@@ -126,15 +188,11 @@ class D1HMoEDisc(D1HMoEBase):
         target_clearance = torch.clamp(obstacle_height + clearance_margin, min=0.04).unsqueeze(1)
         positive_clearance = torch.clamp(foot_clearance, min=0.0)
 
-        # Mean progress keeps both wheels involved; max progress gives early signal
-        # when only one side has discovered the lift motion.
         per_foot_progress = torch.clamp(positive_clearance / target_clearance, 0.0, 1.0)
-        mean_progress = per_foot_progress.mean(dim=1)
-        max_progress = per_foot_progress.max(dim=1).values
-        min_clearance = positive_clearance.min(dim=1).values
-        clearance_error = torch.clamp(target_clearance.squeeze(1) - min_clearance, min=0.0)
-        both_clear_bonus = torch.exp(-torch.square(clearance_error / sigma))
-        reward = 0.55 * mean_progress + 0.30 * max_progress + 0.15 * both_clear_bonus
+        lead_progress = per_foot_progress.max(dim=1).values
+        support_progress = per_foot_progress.min(dim=1).values
+        single_leg_lead = lead_progress * (1.0 - support_progress)
+        reward = 0.70 * lead_progress + 0.30 * single_leg_lead
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -157,12 +215,15 @@ class D1HMoEDisc(D1HMoEBase):
 
         lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
         per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
-        reward = 0.70 * per_foot_lift.mean(dim=1) + 0.30 * per_foot_lift.max(dim=1).values
+        lead_lift = per_foot_lift.max(dim=1).values
+        support_lift = per_foot_lift.min(dim=1).values
+        single_leg_lift = torch.clamp(lead_lift - support_lift, min=0.0)
+        reward = 0.75 * lead_lift + 0.25 * single_leg_lift
 
         return reward * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_pre_lift(self):
-        """Reward lifting before impact, not being lifted by the stair edge."""
+        """Small bonus for using height scan to lift before contact."""
 
         context = self._get_step_lift_context()
         if context is None:
@@ -197,36 +258,46 @@ class D1HMoEDisc(D1HMoEBase):
 
         return reward * active.float() * self._get_stair_reward_gate()
 
-    def _reward_step_bump(self):
-        """Penalize hitting the stair with low clearance and high foot contact."""
+    def _reward_step_reactive_lift(self):
+        """Reward lifting and unloading shortly after contacting the stair."""
 
-        context = self._get_step_lift_context()
-        if context is None:
+        signal = self._get_step_blocking_signal()
+        if signal is None:
             return torch.zeros(self.num_envs, device=self.device)
 
-        active, obstacle_height, foot_clearance, zeros = context
-        if not torch.any(active):
+        active, obstacle_height, foot_clearance, max_contact, _, zeros = signal
+        recent_contact = self.step_contact_timer > 0.0
+        if not torch.any(active & recent_contact):
             return zeros
 
-        contact_norm = self._get_foot_contact_norm()
-        if contact_norm is None:
-            return zeros
+        min_lift = getattr(self.cfg.rewards, "step_reactive_lift_min_height", 0.08)
+        margin = getattr(self.cfg.rewards, "step_reactive_lift_margin", 0.07)
+        target_lift = torch.clamp(obstacle_height + margin, min=min_lift)
+        positive_clearance = torch.clamp(foot_clearance, min=0.0)
+        per_foot_progress = torch.clamp(positive_clearance / torch.clamp(target_lift.unsqueeze(1), min=0.04), 0.0, 1.0)
+        lead_progress = per_foot_progress.max(dim=1).values
+        support_progress = per_foot_progress.min(dim=1).values
+        single_leg_lead = lead_progress * (1.0 - support_progress)
+        lift_progress = 0.75 * lead_progress + 0.25 * single_leg_lead
 
-        margin = getattr(self.cfg.rewards, "step_bump_clearance_margin", 0.04)
-        force_threshold = getattr(self.cfg.rewards, "step_bump_force_threshold", 500.0)
-        force_scale = getattr(self.cfg.rewards, "step_bump_force_scale", 800.0)
+        unload_low = getattr(self.cfg.rewards, "step_reactive_unload_force_low", 80.0)
+        unload_high = getattr(self.cfg.rewards, "step_reactive_unload_force_high", 300.0)
+        unload_score = 1.0 - torch.clamp((max_contact - unload_low) / max(unload_high - unload_low, 1e-6), 0.0, 1.0)
 
-        target_clearance = torch.clamp(obstacle_height + margin, min=0.04)
-        max_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
-        low_clearance = torch.clamp(
-            (target_clearance - max_clearance) / torch.clamp(target_clearance, min=0.04),
-            0.0,
-            1.0,
-        )
-        max_contact = contact_norm.max(dim=1).values
-        impact = torch.clamp((max_contact - force_threshold) / max(force_scale, 1e-6), 0.0, 1.0)
+        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
+        forward_score = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
 
-        return low_clearance * impact * active.float() * self._get_stair_reward_gate()
+        reward = 0.60 * lift_progress + 0.25 * unload_score + 0.15 * forward_score
+        return reward * active.float() * recent_contact.float() * self._get_stair_reward_gate()
+
+    def _reward_step_bump(self):
+        """Penalize sustained jamming, not the first probing contact."""
+
+        grace_time = getattr(self.cfg.rewards, "step_jam_grace_time", 0.12)
+        time_scale = getattr(self.cfg.rewards, "step_jam_time_scale", 0.20)
+        jam_score = torch.clamp((self.step_jam_time - grace_time) / max(time_scale, 1e-6), 0.0, 1.0)
+        return jam_score * self._get_stair_posture_gate()
 
     def _reward_step_progress(self):
         """Reward forward progress when a front step is detected."""
@@ -294,6 +365,24 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_move_down_expected_factor = 0.30
         curriculum_move_down_min_distance = 1.0
 
+    class domain_rand(D1HMoEBaseCfg.domain_rand):
+        # Stair-up is a fine contact skill. Keep moderate robustness, but remove
+        # the large disturbances that make early residual credit assignment noisy.
+        randomize_friction = True
+        friction_range = [0.7, 1.6]
+        randomize_restitution = False
+        restitution_range = [0.0, 0.0]
+        randomize_base_mass = True
+        added_mass_range = [-0.5, 1.0]
+        randomize_base_com = True
+        added_com_range = [-0.03, 0.03]
+        push_robots = False
+        disturbance = False
+        randomize_motor = True
+        motor_strength_range = [0.9, 1.1]
+        randomize_lag_timesteps = True
+        lag_timesteps = 2
+
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
         tracking_sigma = 0.07
@@ -320,14 +409,23 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_min_height = 0.08
         step_lift_margin = 0.09
         step_lift_sigma = 0.07
-        step_stall_min_speed = 0.12
-        step_pre_lift_min_height = 0.06
-        step_pre_lift_margin = 0.07
+        step_stall_min_speed = 0.08
+        step_pre_lift_min_height = 0.08
+        step_pre_lift_margin = 0.09
         step_pre_lift_sigma = 0.05
-        step_pre_lift_max_contact_force = 35.0
-        step_bump_clearance_margin = 0.04
-        step_bump_force_threshold = 500.0
-        step_bump_force_scale = 800.0
+        step_pre_lift_max_contact_force = 80.0
+        step_contact_force_threshold = 80.0
+        step_contact_memory_time = 0.25
+        step_block_clearance_margin = 0.04
+        step_reactive_lift_min_height = 0.08
+        step_reactive_lift_margin = 0.07
+        step_reactive_unload_force_low = 80.0
+        step_reactive_unload_force_high = 300.0
+        step_jam_force_threshold = 280.0
+        step_jam_clearance_ratio = 0.45
+        step_jam_min_speed = 0.08
+        step_jam_grace_time = 0.12
+        step_jam_time_scale = 0.20
         stair_gate_upright_min = 0.70
         stair_gate_base_height_min = 0.28
         stair_gate_base_height_full = 0.40
@@ -336,25 +434,24 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
-            # Keep forward tracking useful but below the stair-specific rewards.
-            tracking_lin_vel_x = 14.0
-            # Reward holding the lateral velocity near zero.
-            tracking_lin_vel_y = 7.0
-            # Mild yaw stabilization; heading is fixed to zero.
-            tracking_ang_vel = 12.0
-            heading = -5.0
+            # Keep forward tracking useful, but do not let it reward hard bumping.
+            tracking_lin_vel_x = 12.0
+            # Stronger lateral/yaw terms because the current failure mode turns and falls.
+            tracking_lin_vel_y = 10.0
+            tracking_ang_vel = 18.0
+            heading = -10.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
-            orientation = -16.0
+            orientation = -22.0
             upward = 2.0
-            ang_vel_xy = -0.12
-            base_height = -3.0
-            lin_vel_z = -0.5
+            ang_vel_xy = -0.20
+            base_height = -5.0
+            lin_vel_z = -1.0
 
             # Failure/contact penalties.
-            termination = -600.0
-            collision = -14.0
-            collision_hard = -35.0
+            termination = -800.0
+            collision = -18.0
+            collision_hard = -55.0
             collision_head = 0.0
 
             # Effort and smoothness are intentionally light during skill acquisition.
@@ -388,12 +485,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             body_symmetry_z = 0.0
 
             # Main stair-up objective.
-            step_clearance = 32.0
-            step_lift = 20.0
-            step_pre_lift = 16.0
-            step_progress = 12.0
-            step_stall = -18.0
-            step_bump = -8.0
+            step_clearance = 20.0
+            step_lift = 28.0
+            step_pre_lift = 12.0
+            step_reactive_lift = 45.0
+            step_progress = 7.0
+            step_stall = -4.0
+            step_bump = -70.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
@@ -416,11 +514,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
-        entropy_coef = 0.0
-        residual_l2_coef = 0.035
+        entropy_coef = 0.002
+        residual_l2_coef = 0.05
         learning_rate = 1.0e-3
         schedule = "adaptive"
-        desired_kl = 0.02
+        desired_kl = 0.015
         gamma = 0.995
         lam = 0.95
         clip_param = 0.2
@@ -438,7 +536,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         barlow_latent_dim = 16
         barlow_obs_encoder_dims = [128, 64]
         critic_hidden_dims = [512, 256, 128]
-        init_noise_std = 0.45
+        init_noise_std = 0.70
 
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = "d1h_moe_disc"

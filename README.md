@@ -42,11 +42,13 @@ tmux attach -t d1h_train
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 5000 \
-  --reset_residual_std 0.45 \
-  --resume \
-  --load_run Jun07_16-01-49_residual_disc_base7400_resume \
-  --checkpoint 1400 
+  --max_iterations 8000 \
+  --residual_alpha 0.60 \
+  --residual_alpha_warmup_steps 3000 \
+  --residual_delta_clip 0.65 \
+  --residual_std_min 0.45 \
+  --residual_std_max 1.10 \
+  --reset_residual_std 0.75
 
 
 

@@ -35,13 +35,13 @@ def get_residual_args():
         {"name": "--seed", "type": int, "help": "Override random seed."},
         {"name": "--max_iterations", "type": int, "help": "Override max learning iterations."},
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Checkpoint path for the frozen base policy."},
-        {"name": "--residual_alpha", "type": float, "default": 0.55, "help": "Final scale factor for the residual expert mean."},
-        {"name": "--residual_alpha_warmup_steps", "type": int, "default": 2000, "help": "Iterations used to ramp residual alpha to its final value."},
+        {"name": "--residual_alpha", "type": float, "default": 0.60, "help": "Final scale factor for the residual expert mean."},
+        {"name": "--residual_alpha_warmup_steps", "type": int, "default": 3000, "help": "Iterations used to ramp residual alpha to its final value."},
         {"name": "--residual_alpha_warmup_min", "type": float, "default": 0.25, "help": "Initial alpha fraction during warmup."},
-        {"name": "--residual_delta_clip", "type": float, "default": 0.55, "help": "Per-action clamp for alpha-scaled residual mean. Set <=0 to disable."},
+        {"name": "--residual_delta_clip", "type": float, "default": 0.65, "help": "Per-action clamp for alpha-scaled residual mean. Set <=0 to disable."},
         {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
-        {"name": "--residual_std_min", "type": float, "default": 0.25, "help": "Lower clamp for the final executed action std."},
-        {"name": "--residual_std_max", "type": float, "default": 0.80, "help": "Upper clamp for the final executed action std."},
+        {"name": "--residual_std_min", "type": float, "default": 0.45, "help": "Lower clamp for the final executed action std."},
+        {"name": "--residual_std_max", "type": float, "default": 1.10, "help": "Upper clamp for the final executed action std."},
         {"name": "--reset_residual_std", "type": float, "default": None, "help": "If set, overwrite residual std after loading a resume checkpoint."},
     ]
 
