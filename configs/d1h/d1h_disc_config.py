@@ -4,6 +4,29 @@ from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
 
 class D1HMoEDisc(D1HMoEBase):
+    def _update_terrain_curriculum(self, env_ids):
+        """Use a stair-specific curriculum instead of pure full-terrain distance."""
+        if not self.init_done:
+            return
+
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        move_up_distance = getattr(self.cfg.terrain, "curriculum_move_up_distance", 3.0)
+        move_down_expected_factor = getattr(self.cfg.terrain, "curriculum_move_down_expected_factor", 0.30)
+        move_down_min_distance = getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 1.0)
+
+        expected_distance = torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s
+        move_up = distance > move_up_distance
+        move_down_distance = torch.clamp(expected_distance * move_down_expected_factor, min=move_down_min_distance)
+        move_down = (distance < move_down_distance) & ~move_up
+
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0),
+        )
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
     def _get_step_lift_context(self):
         zeros = torch.zeros(self.num_envs, device=self.device)
 
@@ -195,6 +218,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_width_range = [0.30, 0.55]
         slope = [0.0, 0.08]
         slope_treshold = 0.3
+        curriculum_move_up_distance = 3.0
+        curriculum_move_down_expected_factor = 0.30
+        curriculum_move_down_min_distance = 1.0
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
@@ -232,12 +258,12 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
             # Keep forward tracking useful but below the stair-specific rewards.
-            tracking_lin_vel_x = 12.0
+            tracking_lin_vel_x = 18.0
             # Reward holding the lateral velocity near zero.
-            tracking_lin_vel_y = 4.0
+            tracking_lin_vel_y = 7.0
             # Mild yaw stabilization; heading is fixed to zero.
-            tracking_ang_vel = 6.0
-            heading = 0.0
+            tracking_ang_vel = 12.0
+            heading = -5.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -16.0
@@ -256,7 +282,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             torques = 0.0
             powers = -2.0e-5
             dof_acc = -1.5e-7
-            action_rate = -0.035
+            action_rate = -0.045
             action_smoothness = 0.0
             dof_pos_limits = 0.0
             dof_vel_limits = 0.0
@@ -310,7 +336,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         entropy_coef = 0.0
-        residual_l2_coef = 0.015
+        residual_l2_coef = 0.035
         learning_rate = 1.0e-3
         schedule = "adaptive"
         desired_kl = 0.02

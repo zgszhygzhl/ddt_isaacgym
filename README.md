@@ -54,10 +54,10 @@ tmux attach -t d1h_train
   python scripts/play_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --load_run Jun07_14-44-00_residual_disc_base7400_resume \
+  --load_run Jun08_12-59-50_ \
   --checkpoint 3200 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
-  --residual_alpha 0.3 \
+  --residual_alpha 0.55 \
   --cmd_x 0.5 \
   --cmd_y 0.0 \
   --cmd_yaw 0.0 \
