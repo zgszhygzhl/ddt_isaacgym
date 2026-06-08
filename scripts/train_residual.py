@@ -35,10 +35,13 @@ def get_residual_args():
         {"name": "--seed", "type": int, "help": "Override random seed."},
         {"name": "--max_iterations", "type": int, "help": "Override max learning iterations."},
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Checkpoint path for the frozen base policy."},
-        {"name": "--residual_alpha", "type": float, "default": 0.7, "help": "Scale factor for the residual expert mean."},
+        {"name": "--residual_alpha", "type": float, "default": 0.55, "help": "Final scale factor for the residual expert mean."},
+        {"name": "--residual_alpha_warmup_steps", "type": int, "default": 2000, "help": "Iterations used to ramp residual alpha to its final value."},
+        {"name": "--residual_alpha_warmup_min", "type": float, "default": 0.25, "help": "Initial alpha fraction during warmup."},
+        {"name": "--residual_delta_clip", "type": float, "default": 0.65, "help": "Per-action clamp for alpha-scaled residual mean. Set <=0 to disable."},
         {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
-        {"name": "--residual_std_min", "type": float, "default": 0.5, "help": "Lower clamp for the final executed action std."},
-        {"name": "--residual_std_max", "type": float, "default": 1.0, "help": "Upper clamp for the final executed action std."},
+        {"name": "--residual_std_min", "type": float, "default": 0.25, "help": "Lower clamp for the final executed action std."},
+        {"name": "--residual_std_max", "type": float, "default": 0.80, "help": "Upper clamp for the final executed action std."},
         {"name": "--reset_residual_std", "type": float, "default": None, "help": "If set, overwrite residual std after loading a resume checkpoint."},
     ]
 
@@ -99,6 +102,9 @@ def train(args):
         residual_std_scale=args.residual_std_scale,
         min_policy_std=args.residual_std_min,
         max_policy_std=args.residual_std_max,
+        residual_delta_clip=args.residual_delta_clip,
+        alpha_warmup_steps=args.residual_alpha_warmup_steps,
+        alpha_warmup_min=args.residual_alpha_warmup_min,
     )
 
     log_dir = build_log_dir(train_cfg)
@@ -106,6 +112,9 @@ def train(args):
     print("[train_residual] base_task      =", args.base_task)
     print("[train_residual] base_ckpt      =", args.base_ckpt)
     print("[train_residual] residual_alpha =", args.residual_alpha)
+    print("[train_residual] residual_alpha_warmup_steps =", args.residual_alpha_warmup_steps)
+    print("[train_residual] residual_alpha_warmup_min =", args.residual_alpha_warmup_min)
+    print("[train_residual] residual_delta_clip =", args.residual_delta_clip)
     print("[train_residual] residual_std_scale =", actor_critic.residual_std_scale)
     print("[train_residual] residual_std_range =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
     print("[train_residual] reset_residual_std =", args.reset_residual_std)

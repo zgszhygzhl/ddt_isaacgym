@@ -389,6 +389,9 @@ class OnConstraintPolicyRunner:
             self.alg.actor_critic.imitation_mode()
             
         for it in range(self.current_learning_iteration, tot_iter):
+            if hasattr(self.alg.actor_critic, "set_learning_iteration"):
+                self.alg.actor_critic.set_learning_iteration(it)
+
             if self.record_video and it % self.video_interval == 0:
                 self._start_train_video(it)
 
@@ -499,6 +502,12 @@ class OnConstraintPolicyRunner:
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         if residual_mean_std is not None:
             self.writer.add_scalar('Policy/residual_mean_noise_std', residual_mean_std.item(), locs['it'])
+        if hasattr(self.alg.actor_critic, "last_current_alpha"):
+            self.writer.add_scalar('Policy/residual_alpha', self.alg.actor_critic.last_current_alpha.item(), locs['it'])
+        if hasattr(self.alg.actor_critic, "last_delta_norm"):
+            self.writer.add_scalar('Policy/residual_delta_norm', self.alg.actor_critic.last_delta_norm.item(), locs['it'])
+        if hasattr(self.alg.actor_critic, "last_saturation_ratio"):
+            self.writer.add_scalar('Policy/action_saturation_ratio', self.alg.actor_critic.last_saturation_ratio.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
         self.writer.add_scalar('Perf/learning_time', locs['learn_time'], locs['it'])

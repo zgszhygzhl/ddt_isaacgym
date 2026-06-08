@@ -58,6 +58,29 @@ class D1HMoEDisc(D1HMoEBase):
 
         return active, obstacle_height, foot_clearance, zeros
 
+    def _get_stair_reward_gate(self):
+        """Gate stair rewards to upright, non-colliding attempts."""
+        upright_score = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
+        upright_min = getattr(self.cfg.rewards, "stair_gate_upright_min", 0.70)
+        upright_gate = torch.clamp((upright_score - upright_min) / (1.0 - upright_min), 0.0, 1.0)
+
+        base_height = self._get_base_heights()
+        min_height = getattr(self.cfg.rewards, "stair_gate_base_height_min", 0.28)
+        full_height = getattr(self.cfg.rewards, "stair_gate_base_height_full", 0.40)
+        height_gate = torch.clamp((base_height - min_height) / max(full_height - min_height, 1e-6), 0.0, 1.0)
+
+        contact_gate = torch.ones(self.num_envs, device=self.device)
+        if hasattr(self, "contact_forces") and hasattr(self, "penalised_contact_indices"):
+            if len(self.penalised_contact_indices) > 0:
+                force_threshold = getattr(self.cfg.rewards, "stair_gate_bad_contact_force", 5.0)
+                bad_contact = torch.any(
+                    torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > force_threshold,
+                    dim=1,
+                )
+                contact_gate = (~bad_contact).float()
+
+        return upright_gate * height_gate * contact_gate
+
     def _reward_step_clearance(self):
         """Reward useful wheel/foot clearance when a front up-step is detected."""
 
@@ -85,7 +108,7 @@ class D1HMoEDisc(D1HMoEBase):
         both_clear_bonus = torch.exp(-torch.square(clearance_error / sigma))
         reward = 0.55 * mean_progress + 0.30 * max_progress + 0.15 * both_clear_bonus
 
-        return reward * active.float()
+        return reward * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_lift(self):
         """Reward reaching a useful lift height while the front step is active."""
@@ -108,7 +131,7 @@ class D1HMoEDisc(D1HMoEBase):
         per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
         reward = 0.70 * per_foot_lift.mean(dim=1) + 0.30 * per_foot_lift.max(dim=1).values
 
-        return reward * active.float()
+        return reward * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_progress(self):
         """Reward forward progress when a front step is detected."""
@@ -124,7 +147,7 @@ class D1HMoEDisc(D1HMoEBase):
         min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
         cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
         progress = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
-        return progress * active.float()
+        return progress * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_stall(self):
         """Penalize stopping at the step edge instead of attempting to climb."""
@@ -139,7 +162,7 @@ class D1HMoEDisc(D1HMoEBase):
 
         min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
         stalled = self.base_lin_vel[:, 0] < min_speed
-        return (active & stalled).float()
+        return (active & stalled).float() * self._get_stair_reward_gate()
 
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
@@ -200,6 +223,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_margin = 0.09
         step_lift_sigma = 0.07
         step_stall_min_speed = 0.12
+        stair_gate_upright_min = 0.70
+        stair_gate_base_height_min = 0.28
+        stair_gate_base_height_full = 0.40
+        stair_gate_bad_contact_force = 5.0
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
@@ -213,23 +240,23 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             heading = 0.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
-            orientation = -10.0
+            orientation = -16.0
             upward = 2.0
-            ang_vel_xy = -0.08
-            base_height = -1.0
-            lin_vel_z = -0.25
+            ang_vel_xy = -0.12
+            base_height = -3.0
+            lin_vel_z = -0.5
 
             # Failure/contact penalties.
-            termination = -120.0
-            collision = -8.0
-            collision_hard = -20.0
+            termination = -600.0
+            collision = -14.0
+            collision_hard = -35.0
             collision_head = 0.0
 
             # Effort and smoothness are intentionally light during skill acquisition.
             torques = 0.0
-            powers = -1.0e-5
-            dof_acc = -1.0e-7
-            action_rate = -0.02
+            powers = -2.0e-5
+            dof_acc = -1.5e-7
+            action_rate = -0.035
             action_smoothness = 0.0
             dof_pos_limits = 0.0
             dof_vel_limits = 0.0
@@ -256,10 +283,15 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             body_symmetry_z = 0.0
 
             # Main stair-up objective.
-            step_clearance = 40.0
-            step_lift = 24.0
+            step_clearance = 32.0
+            step_lift = 20.0
             step_progress = 18.0
-            step_stall = -20.0
+            step_stall = -18.0
+
+    class normalization(D1HMoEBaseCfg.normalization):
+        # Keep exploration broad enough for stair actions, but prevent unbounded
+        # residual samples from destroying the frozen base policy.
+        clip_actions = 2.5
 
     class costs(D1HMoEBaseCfg.costs):
         class scales(D1HMoEBaseCfg.costs.scales):
@@ -278,7 +310,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         entropy_coef = 0.0
-        residual_l2_coef = 0.0
+        residual_l2_coef = 0.015
         learning_rate = 1.0e-3
         schedule = "adaptive"
         desired_kl = 0.02
@@ -290,7 +322,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         num_mini_batches = 4
         value_loss_coef = 1.0
         cost_value_loss_coef = 0.05
-        cost_viol_loss_coef = 0.03
+        cost_viol_loss_coef = 0.05
 
     class policy(D1HMoEBaseCfgPPO.policy):
         actor_hidden_dims = [512, 256, 128]
@@ -299,7 +331,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         barlow_latent_dim = 16
         barlow_obs_encoder_dims = [128, 64]
         critic_hidden_dims = [512, 256, 128]
-        init_noise_std = 0.7
+        init_noise_std = 0.45
 
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = "d1h_moe_disc"

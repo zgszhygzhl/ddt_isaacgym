@@ -15,15 +15,24 @@ class ResidualExpertActorCritic(nn.Module):
         residual_std_scale=None,
         min_policy_std=0.02,
         max_policy_std=1.0,
+        residual_delta_clip=None,
+        alpha_warmup_steps=0,
+        alpha_warmup_min=0.25,
+        zero_init_residual=True,
     ):
         super().__init__()
         self.base_actor_critic = base_actor_critic
         self.residual_actor_critic = residual_actor_critic
+        self.target_alpha = alpha
         self.alpha = alpha
+        self.current_alpha = alpha
         self.freeze_base = freeze_base
         self.residual_std_scale = 1.0 if residual_std_scale is None else residual_std_scale
         self.min_policy_std = min_policy_std
         self.max_policy_std = max_policy_std
+        self.residual_delta_clip = residual_delta_clip
+        self.alpha_warmup_steps = max(0, int(alpha_warmup_steps))
+        self.alpha_warmup_min = max(0.0, min(float(alpha_warmup_min), 1.0))
         # self.imi_flag = getattr(self.residual_actor_critic, "imi_flag", False)
         self.imi_flag = False
         self.distribution = None
@@ -36,6 +45,37 @@ class ResidualExpertActorCritic(nn.Module):
             self.base_actor_critic.eval()
             for parameter in self.base_actor_critic.parameters():
                 parameter.requires_grad = False
+
+        if zero_init_residual:
+            self._zero_init_residual_output()
+
+    def _zero_init_residual_output(self):
+        """Start from the frozen base policy instead of a random residual mean."""
+        target_modules = [
+            getattr(self.residual_actor_critic, "actor_teacher_backbone", None),
+            getattr(self.residual_actor_critic, "actor_student_backbone", None),
+            getattr(self.residual_actor_critic, "actor", None),
+        ]
+        for module in target_modules:
+            if module is None:
+                continue
+            linears = [m for m in module.modules() if isinstance(m, nn.Linear)]
+            if not linears:
+                continue
+            last_linear = linears[-1]
+            nn.init.zeros_(last_linear.weight)
+            if last_linear.bias is not None:
+                nn.init.zeros_(last_linear.bias)
+
+    def set_learning_iteration(self, iteration):
+        if self.alpha_warmup_steps <= 0:
+            self.current_alpha = self.target_alpha
+            self.alpha = self.current_alpha
+            return
+        progress = min(max(float(iteration) / float(self.alpha_warmup_steps), 0.0), 1.0)
+        alpha_scale = self.alpha_warmup_min + (1.0 - self.alpha_warmup_min) * progress
+        self.current_alpha = self.target_alpha * alpha_scale
+        self.alpha = self.current_alpha
 
     def get_residual_std(self):
         if hasattr(self.residual_actor_critic, "get_std"):
@@ -79,8 +119,9 @@ class ResidualExpertActorCritic(nn.Module):
         with torch.no_grad():
             base_mean = self.base_actor_critic.act_inference(obs)
         residual_mean = self.residual_actor_critic.act_inference(obs)
-        # residual mean
-        delta = self.alpha * residual_mean
+        delta = self.current_alpha * residual_mean
+        if self.residual_delta_clip is not None and self.residual_delta_clip > 0:
+            delta = torch.clamp(delta, -self.residual_delta_clip, self.residual_delta_clip)
         final_mean = base_mean + delta
 
         # 关键：residual std 使用独立缩放系数，并限制最终执行范围
@@ -97,6 +138,8 @@ class ResidualExpertActorCritic(nn.Module):
         self.last_residual_std = residual_std.detach()
         self.last_final_std = final_std.detach()
         self.last_saturation_ratio = (final_mean.abs() > 0.95).float().mean().detach()
+        self.last_delta_norm = torch.norm(delta, dim=-1).mean().detach()
+        self.last_current_alpha = torch.as_tensor(self.current_alpha, device=obs.device)
 
         # 如果后面要加 residual 正则，这个不能 detach
         self.current_delta = delta
