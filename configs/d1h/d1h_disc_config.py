@@ -104,6 +104,11 @@ class D1HMoEDisc(D1HMoEBase):
 
         return upright_gate * height_gate * contact_gate
 
+    def _get_foot_contact_norm(self):
+        if not hasattr(self, "contact_forces") or not hasattr(self, "feet_indices"):
+            return None
+        return torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+
     def _reward_step_clearance(self):
         """Reward useful wheel/foot clearance when a front up-step is detected."""
 
@@ -155,6 +160,73 @@ class D1HMoEDisc(D1HMoEBase):
         reward = 0.70 * per_foot_lift.mean(dim=1) + 0.30 * per_foot_lift.max(dim=1).values
 
         return reward * active.float() * self._get_stair_reward_gate()
+
+    def _reward_step_pre_lift(self):
+        """Reward lifting before impact, not being lifted by the stair edge."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, obstacle_height, foot_clearance, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        contact_norm = self._get_foot_contact_norm()
+        if contact_norm is None:
+            return zeros
+
+        min_lift = getattr(self.cfg.rewards, "step_pre_lift_min_height", 0.06)
+        margin = getattr(self.cfg.rewards, "step_pre_lift_margin", 0.07)
+        sigma = getattr(self.cfg.rewards, "step_pre_lift_sigma", 0.05)
+        max_lift_contact = getattr(self.cfg.rewards, "step_pre_lift_max_contact_force", 35.0)
+
+        target_lift = torch.clamp(obstacle_height + margin, min=min_lift)
+        positive_clearance = torch.clamp(foot_clearance, min=0.0)
+        lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
+        lift_score = torch.exp(-torch.square(lift_error / sigma))
+
+        # A real pre-lift should happen with low foot contact; if the stair edge
+        # is pushing the wheel up, contact force is usually high.
+        low_contact_score = torch.clamp(
+            (max_lift_contact - contact_norm) / max(max_lift_contact, 1e-6),
+            0.0,
+            1.0,
+        )
+        reward = (lift_score * low_contact_score).max(dim=1).values
+
+        return reward * active.float() * self._get_stair_reward_gate()
+
+    def _reward_step_bump(self):
+        """Penalize hitting the stair with low clearance and high foot contact."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, obstacle_height, foot_clearance, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        contact_norm = self._get_foot_contact_norm()
+        if contact_norm is None:
+            return zeros
+
+        margin = getattr(self.cfg.rewards, "step_bump_clearance_margin", 0.04)
+        force_threshold = getattr(self.cfg.rewards, "step_bump_force_threshold", 500.0)
+        force_scale = getattr(self.cfg.rewards, "step_bump_force_scale", 800.0)
+
+        target_clearance = torch.clamp(obstacle_height + margin, min=0.04)
+        max_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+        low_clearance = torch.clamp(
+            (target_clearance - max_clearance) / torch.clamp(target_clearance, min=0.04),
+            0.0,
+            1.0,
+        )
+        max_contact = contact_norm.max(dim=1).values
+        impact = torch.clamp((max_contact - force_threshold) / max(force_scale, 1e-6), 0.0, 1.0)
+
+        return low_clearance * impact * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_progress(self):
         """Reward forward progress when a front step is detected."""
@@ -249,6 +321,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_margin = 0.09
         step_lift_sigma = 0.07
         step_stall_min_speed = 0.12
+        step_pre_lift_min_height = 0.06
+        step_pre_lift_margin = 0.07
+        step_pre_lift_sigma = 0.05
+        step_pre_lift_max_contact_force = 35.0
+        step_bump_clearance_margin = 0.04
+        step_bump_force_threshold = 500.0
+        step_bump_force_scale = 800.0
         stair_gate_upright_min = 0.70
         stair_gate_base_height_min = 0.28
         stair_gate_base_height_full = 0.40
@@ -258,7 +337,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
             # Keep forward tracking useful but below the stair-specific rewards.
-            tracking_lin_vel_x = 18.0
+            tracking_lin_vel_x = 14.0
             # Reward holding the lateral velocity near zero.
             tracking_lin_vel_y = 7.0
             # Mild yaw stabilization; heading is fixed to zero.
@@ -311,8 +390,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective.
             step_clearance = 32.0
             step_lift = 20.0
-            step_progress = 18.0
+            step_pre_lift = 16.0
+            step_progress = 12.0
             step_stall = -18.0
+            step_bump = -8.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
