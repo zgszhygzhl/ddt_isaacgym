@@ -27,25 +27,34 @@ class D1HMoEDisc(D1HMoEBase):
         move_up_distance = getattr(self.cfg.terrain, "curriculum_move_up_distance", 3.0)
         move_down_expected_factor = getattr(self.cfg.terrain, "curriculum_move_down_expected_factor", 0.30)
         move_down_min_distance = getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 1.0)
-        success_reward_threshold = getattr(self.cfg.terrain, "curriculum_success_reward_threshold", 0.25)
-        success_down_threshold = getattr(self.cfg.terrain, "curriculum_success_down_threshold", 0.02)
+        success_reward_threshold = getattr(self.cfg.terrain, "curriculum_success_reward_threshold", 0.85)
+        success_down_threshold = getattr(self.cfg.terrain, "curriculum_success_down_threshold", 0.15)
+        success_min_distance = getattr(self.cfg.terrain, "curriculum_success_min_distance", 1.8)
+        success_min_episode_time = getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 8.0)
+        max_allowed_level = min(
+            getattr(self.cfg.terrain, "curriculum_max_terrain_level", self.max_terrain_level - 1),
+            self.max_terrain_level - 1,
+        )
 
         expected_distance = torch.norm(self.commands[env_ids, :2], dim=1) * self.max_episode_length_s
+        episode_time = self.episode_length_buf[env_ids].float() * self.dt
         if hasattr(self, "episode_sums") and "step_success" in self.episode_sums:
             step_success = self.episode_sums["step_success"][env_ids] / self.max_episode_length_s
         else:
             step_success = torch.zeros_like(distance)
 
-        move_up = (step_success > success_reward_threshold) | (distance > move_up_distance)
+        move_up_by_success = (
+            (step_success > success_reward_threshold)
+            & (distance > success_min_distance)
+            & (episode_time > success_min_episode_time)
+        )
+        move_up_by_distance = distance > move_up_distance
+        move_up = move_up_by_success | move_up_by_distance
         move_down_distance = torch.clamp(expected_distance * move_down_expected_factor, min=move_down_min_distance)
         move_down = (step_success < success_down_threshold) & (distance < move_down_distance) & ~move_up
 
         self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
-        self.terrain_levels[env_ids] = torch.where(
-            self.terrain_levels[env_ids] >= self.max_terrain_level,
-            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-            torch.clip(self.terrain_levels[env_ids], 0),
-        )
+        self.terrain_levels[env_ids] = torch.clip(self.terrain_levels[env_ids], 0, max_allowed_level)
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def _get_step_lift_context(self):
@@ -485,8 +494,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_move_up_distance = 4.5
         curriculum_move_down_expected_factor = 0.25
         curriculum_move_down_min_distance = 0.8
-        curriculum_success_reward_threshold = 0.25
-        curriculum_success_down_threshold = 0.02
+        curriculum_success_reward_threshold = 0.85
+        curriculum_success_down_threshold = 0.15
+        curriculum_success_min_distance = 1.8
+        curriculum_success_min_episode_time = 8.0
+        curriculum_max_terrain_level = 5
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -652,8 +664,10 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         entropy_coef = 0.001
         residual_l2_coef = 0.25
         learning_rate = 3.0e-4
-        schedule = "fixed"
-        desired_kl = 0.015
+        learning_rate_min = 5.0e-5
+        learning_rate_max = 6.0e-3
+        schedule = "adaptive"
+        desired_kl = 0.01
         gamma = 0.995
         lam = 0.95
         clip_param = 0.2

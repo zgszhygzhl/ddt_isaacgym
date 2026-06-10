@@ -23,6 +23,8 @@ class NP3O:
                  cost_viol_loss_coef=1.0,
                  entropy_coef=0.0,
                  learning_rate=1e-3,
+                 learning_rate_min=5e-5,
+                 learning_rate_max=1e-2,
                  max_grad_norm=1.0,
                  use_clipped_value_loss=True,
                  schedule="fixed",
@@ -39,6 +41,8 @@ class NP3O:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.learning_rate_min = learning_rate_min
+        self.learning_rate_max = learning_rate_max
 
         # PPO components
         self.actor_critic = actor_critic
@@ -217,9 +221,9 @@ class NP3O:
                         kl_mean = torch.mean(kl)
 
                         if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(5e-5, self.learning_rate / 1.5)
+                            self.learning_rate = max(self.learning_rate_min, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                            self.learning_rate = min(self.learning_rate_max, self.learning_rate * 1.5)
                         
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.learning_rate
