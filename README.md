@@ -36,19 +36,20 @@ tmux ls
 tmux attach -t d1h_train
 
 训练moe专家
-  python scripts/train_residual.py \
+python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
   --max_iterations 8000 \
-  --residual_alpha 0.60 \
+  --residual_alpha 0.35 \
   --residual_alpha_warmup_steps 3000 \
-  --residual_delta_clip 0.65 \
-  --residual_std_min 0.45 \
-  --residual_std_max 1.10 \
-  --reset_residual_std 0.75
+  --residual_alpha_warmup_min 0.15 \
+  --residual_delta_clip 0.45 \
+  --residual_std_min 0.25 \
+  --residual_std_max 0.75 \
+  --reset_residual_std 0.5
 
 
 

@@ -416,7 +416,7 @@ class LeggedRobot(BaseTask):
         self.feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
 
         #self.roll, self.pitch, self.yaw = euler_from_quaternion(self.base_quat)
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact = self._get_feet_contact_forces()[:, :, 2] > 1.
         self.contact_filt = torch.logical_or(contact, self.last_contacts) 
         self.last_contacts = contact
 
@@ -438,6 +438,12 @@ class LeggedRobot(BaseTask):
 
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
+
+    def _get_feet_contact_forces(self):
+        use_force_sensor = getattr(self.cfg.asset, "use_force_sensor_contacts", False)
+        if use_force_sensor and hasattr(self, "force_sensor_tensor") and torch.is_tensor(self.force_sensor_tensor):
+            return self.force_sensor_tensor[:, :, :3]
+        return self.contact_forces[:, self.feet_indices, :]
 
     def set_camera(self, position, lookat):
         """ Set camera position and direction
@@ -1250,7 +1256,7 @@ class LeggedRobot(BaseTask):
     def _reward_feet_air_time(self):
         # Reward long steps
         # Need to filter the contacts because the contact reporting of PhysX is unreliable on meshes
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact = self._get_feet_contact_forces()[:, :, 2] > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts) 
         self.last_contacts = contact
         first_contact = (self.feet_air_time > 0.) * contact_filt
@@ -1268,13 +1274,14 @@ class LeggedRobot(BaseTask):
 
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
-        # print(torch.norm(self.contact_forces[0, self.feet_indices, :], dim=-1))
-        return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+        feet_contact_forces = self._get_feet_contact_forces()
+        return torch.sum((torch.norm(feet_contact_forces, dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
 
     def _reward_stumble(self):
         # Penalize feet hitting vertical surfaces
-        return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >\
-             5 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
+        feet_contact_forces = self._get_feet_contact_forces()
+        return torch.any(torch.norm(feet_contact_forces[:, :, :2], dim=2) >\
+             5 *torch.abs(feet_contact_forces[:, :, 2]), dim=1)
     #------------ cost functions----------------
     """
     def _reward_dof_pos_limits(self):

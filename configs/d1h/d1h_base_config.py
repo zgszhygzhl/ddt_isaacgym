@@ -124,7 +124,11 @@ class D1HMoEBase(LeggedRobot):
         for s in feet_names:
             feet_idx = self.gym.find_asset_rigid_body_index(robot_asset, s)
             sensor_pose = gymapi.Transform(gymapi.Vec3(0.0, 0.0, 0.0))
-            self.gym.create_asset_force_sensor(robot_asset, feet_idx, sensor_pose)
+            sensor_options = gymapi.ForceSensorProperties()
+            sensor_options.enable_forward_dynamics_forces = False
+            sensor_options.enable_constraint_solver_forces = True
+            sensor_options.use_world_frame = True
+            self.gym.create_asset_force_sensor(robot_asset, feet_idx, sensor_pose, sensor_options)
         
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
@@ -585,6 +589,7 @@ class D1HMoEBaseCfg( LeggedRobotCfg ):
         penalize_contacts_on = ["thigh", "calf", "base"]
         penalize_contact_head_on = ["base"]
         terminate_after_contacts_on = ["base"]
+        use_force_sensor_contacts = True
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
         replace_cylinder_with_capsule = False  # replace collision cylinders with capsules, leads to faster/more stable simulation
         flip_visual_attachments = False

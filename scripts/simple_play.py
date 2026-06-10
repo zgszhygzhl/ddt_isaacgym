@@ -207,7 +207,11 @@ def play(args):
                         'base_vel_z': env.base_lin_vel[robot_index, 2].item(),
                         'base_vel_yaw': env.base_ang_vel[robot_index, 2].item(),
                         'base_heading': actual_heading,
-                        'contact_forces_z': env.contact_forces[robot_index, env.feet_indices, 2].cpu().numpy(),
+                        'contact_forces_z': (
+                            env.force_sensor_tensor[robot_index, :, 2].cpu().numpy()
+                            if hasattr(env, "force_sensor_tensor")
+                            else env.contact_forces[robot_index, env.feet_indices, 2].cpu().numpy()
+                        ),
                         'base_height': env._get_base_heights()[robot_index].item(),
                         'command_height': env.cfg.rewards.base_height_target,
                         'torques': env.torques[robot_index, :].tolist(),
