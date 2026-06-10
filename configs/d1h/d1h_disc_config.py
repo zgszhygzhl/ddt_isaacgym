@@ -31,6 +31,7 @@ class D1HMoEDisc(D1HMoEBase):
         success_down_threshold = getattr(self.cfg.terrain, "curriculum_success_down_threshold", 0.15)
         success_min_distance = getattr(self.cfg.terrain, "curriculum_success_min_distance", 1.8)
         success_min_episode_time = getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 8.0)
+        allow_distance_promotion = getattr(self.cfg.terrain, "curriculum_allow_distance_promotion", False)
         max_allowed_level = min(
             getattr(self.cfg.terrain, "curriculum_max_terrain_level", self.max_terrain_level - 1),
             self.max_terrain_level - 1,
@@ -48,7 +49,7 @@ class D1HMoEDisc(D1HMoEBase):
             & (distance > success_min_distance)
             & (episode_time > success_min_episode_time)
         )
-        move_up_by_distance = distance > move_up_distance
+        move_up_by_distance = (distance > move_up_distance) & allow_distance_promotion
         move_up = move_up_by_success | move_up_by_distance
         move_down_distance = torch.clamp(expected_distance * move_down_expected_factor, min=move_down_min_distance)
         move_down = (step_success < success_down_threshold) & (distance < move_down_distance) & ~move_up
@@ -313,13 +314,11 @@ class D1HMoEDisc(D1HMoEBase):
 
         min_lift = getattr(self.cfg.rewards, "step_pre_lift_min_height", 0.06)
         margin = getattr(self.cfg.rewards, "step_pre_lift_margin", 0.07)
-        sigma = getattr(self.cfg.rewards, "step_pre_lift_sigma", 0.05)
         max_lift_contact = getattr(self.cfg.rewards, "step_pre_lift_max_contact_force", 35.0)
 
         target_lift = torch.clamp(obstacle_height + margin, min=min_lift)
         positive_clearance = torch.clamp(foot_clearance, min=0.0)
-        lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
-        lift_score = torch.exp(-torch.square(lift_error / sigma))
+        lift_score = torch.clamp(positive_clearance / torch.clamp(target_lift.unsqueeze(1), min=0.04), 0.0, 1.0)
 
         # A real pre-lift should happen with low foot contact; if the stair edge
         # is pushing the wheel up, contact force is usually high.
@@ -328,7 +327,9 @@ class D1HMoEDisc(D1HMoEBase):
             0.0,
             1.0,
         )
-        reward = (lift_score * low_contact_score).max(dim=1).values
+        lead_lift = lift_score.max(dim=1).values
+        unloaded_lift = (lift_score * low_contact_score).max(dim=1).values
+        reward = 0.45 * lead_lift + 0.55 * unloaded_lift
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -411,7 +412,7 @@ class D1HMoEDisc(D1HMoEBase):
         return up_progress * (0.5 + 0.5 * forward_score) * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_success(self):
-        """Reward a completed stair transition with a dense, visible success signal."""
+        """Reward a completed stair transition that is followed by stable travel."""
 
         context = self._get_stair_height_context()
         if context is None:
@@ -441,7 +442,26 @@ class D1HMoEDisc(D1HMoEBase):
         speed_score = torch.clamp(self.base_lin_vel[:, 0] / max(min_speed, 1e-6), 0.0, 1.0)
         recovery_score = 0.5 + 0.5 * speed_score
 
-        success_score = (0.35 * height_ratio + 0.65 * height_complete) * base_score * recovery_score
+        distance = torch.norm(self.root_states[:, :2] - self.env_origins[:, :2], dim=1)
+        min_distance = getattr(self.cfg.rewards, "step_success_min_distance", 1.0)
+        full_distance = getattr(self.cfg.rewards, "step_success_full_distance", 2.0)
+        distance_score = torch.clamp(
+            (distance - min_distance) / max(full_distance - min_distance, 1e-6),
+            0.0,
+            1.0,
+        )
+
+        episode_time = self.episode_length_buf.float() * self.dt
+        min_time = getattr(self.cfg.rewards, "step_success_min_time", 3.0)
+        full_time = getattr(self.cfg.rewards, "step_success_full_time", 8.0)
+        time_score = torch.clamp(
+            (episode_time - min_time) / max(full_time - min_time, 1e-6),
+            0.0,
+            1.0,
+        )
+
+        height_score = 0.25 * height_ratio + 0.75 * height_complete
+        success_score = height_score * base_score * recovery_score * distance_score * time_score
         return success_score * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_stall(self):
@@ -476,7 +496,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
         class ranges:
             # Values below 0.2 are zeroed by the base command sampler.
-            lin_vel_x = [0.28, 0.38]
+            lin_vel_x = [0.32, 0.44]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [0.0, 0.0]
             heading = [0.0, 0.0]
@@ -491,14 +511,15 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.3
-        curriculum_move_up_distance = 4.5
+        curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.25
         curriculum_move_down_min_distance = 0.8
-        curriculum_success_reward_threshold = 0.85
+        curriculum_success_reward_threshold = 0.60
         curriculum_success_down_threshold = 0.15
-        curriculum_success_min_distance = 1.8
-        curriculum_success_min_episode_time = 8.0
-        curriculum_max_terrain_level = 5
+        curriculum_success_min_distance = 2.4
+        curriculum_success_min_episode_time = 12.0
+        curriculum_allow_distance_promotion = False
+        curriculum_max_terrain_level = 1
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -530,8 +551,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         base_height_deadband = 0.01
 
         # Front height scan window used only by the stair rewards.
-        step_clearance_front_x_min = 0.05
-        step_clearance_front_x_max = 0.75
+        step_clearance_front_x_min = 0.20
+        step_clearance_front_x_max = 0.80
         step_clearance_center_x_abs = 0.15
         step_clearance_y_abs = 0.45
 
@@ -548,19 +569,19 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_pre_lift_min_height = 0.08
         step_pre_lift_margin = 0.09
         step_pre_lift_sigma = 0.05
-        step_pre_lift_max_contact_force = 80.0
-        step_contact_force_threshold = 80.0
-        step_contact_memory_time = 0.25
+        step_pre_lift_max_contact_force = 160.0
+        step_contact_force_threshold = 50.0
+        step_contact_memory_time = 0.45
         step_block_clearance_margin = 0.04
         step_reactive_lift_min_height = 0.08
         step_reactive_lift_margin = 0.07
-        step_reactive_unload_force_low = 80.0
-        step_reactive_unload_force_high = 300.0
-        step_jam_force_threshold = 280.0
+        step_reactive_unload_force_low = 120.0
+        step_reactive_unload_force_high = 450.0
+        step_jam_force_threshold = 450.0
         step_jam_clearance_ratio = 0.45
         step_jam_min_speed = 0.08
-        step_jam_grace_time = 0.12
-        step_jam_time_scale = 0.20
+        step_jam_grace_time = 0.25
+        step_jam_time_scale = 0.35
         stair_gate_upright_min = 0.70
         stair_gate_base_height_min = 0.28
         stair_gate_base_height_full = 0.40
@@ -573,13 +594,17 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_success_min_base_height = 0.30
         step_success_full_base_height = 0.40
         step_success_min_speed = 0.10
+        step_success_min_distance = 1.0
+        step_success_full_distance = 2.2
+        step_success_min_time = 3.0
+        step_success_full_time = 8.0
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
             # Keep only a weak forward guardrail. Y/yaw rewards were mostly free
             # bonuses with zero commands, so they hide the real stair signal.
-            tracking_lin_vel_x = 6.0
+            tracking_lin_vel_x = 10.0
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 0.0
             heading = -2.0
@@ -629,20 +654,20 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
-            step_clearance = 3.0
-            step_lift = 3.0
+            step_clearance = 2.0
+            step_lift = 6.0
             step_pre_lift = 0.0
-            step_reactive_lift = 0.0
+            step_reactive_lift = 45.0
             step_progress = 0.0
-            step_up = 20.0
-            step_success = 120.0
-            step_stall = -4.0
-            step_bump = -80.0
+            step_up = 35.0
+            step_success = 45.0
+            step_stall = -8.0
+            step_bump = -40.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
         # residual samples from destroying the frozen base policy.
-        clip_actions = 1.3
+        clip_actions = 1.6
 
     class costs(D1HMoEBaseCfg.costs):
         class scales(D1HMoEBaseCfg.costs.scales):
@@ -662,7 +687,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         entropy_coef = 0.001
-        residual_l2_coef = 0.25
+        residual_l2_coef = 0.05
         learning_rate = 3.0e-4
         learning_rate_min = 5.0e-5
         learning_rate_max = 6.0e-3
