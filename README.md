@@ -42,14 +42,14 @@ python scripts/train_residual.py \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 12000 \
+  --max_iterations 8000 \
   --residual_alpha 0.25 \
-  --residual_alpha_warmup_steps 6000 \
+  --residual_alpha_warmup_steps 3000 \
   --residual_alpha_warmup_min 0.15 \
   --residual_delta_clip 0.30 \
-  --residual_std_min 0.12 \
-  --residual_std_max 0.45 \
-  --reset_residual_std 0.30
+  --residual_std_min 0.2 \
+  --residual_std_max 0.65 \
+  --reset_residual_std 0.4
 
 
 

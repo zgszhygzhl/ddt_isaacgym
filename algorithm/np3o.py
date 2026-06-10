@@ -167,6 +167,8 @@ class NP3O:
         return self.k_value
     
     def compute_viol(self,actions_log_prob_batch,old_actions_log_prob_batch,cost_advantages_batch,cost_volation_batch):
+        if self.k_value.numel() == 0:
+            return torch.zeros((), device=self.device)
 
         # compute cliped cost advantage
         cost_surrogate_loss = self.compute_cost_surrogate_loss(actions_log_prob_batch=actions_log_prob_batch,
