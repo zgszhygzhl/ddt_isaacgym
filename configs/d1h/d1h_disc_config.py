@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
@@ -9,17 +11,206 @@ class D1HMoEDisc(D1HMoEBase):
         self.step_contact_timer = torch.zeros(self.num_envs, device=self.device)
         self.step_jam_time = torch.zeros(self.num_envs, device=self.device)
         self.step_imbalance_time = torch.zeros(self.num_envs, device=self.device)
+        self.stair_lift_phase = torch.zeros(self.num_envs, 2, device=self.device)
+        self.stair_lift_active = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+        self.stair_lift_side = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.stair_contact_hist = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self.last_stair_ff_signal = torch.zeros(self.num_envs, 2, device=self.device)
+        self.last_stair_trigger = torch.zeros(self.num_envs, 2, device=self.device)
+        self.stair_followup_used = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
         self.step_contact_timer[env_ids] = 0.0
         self.step_jam_time[env_ids] = 0.0
         self.step_imbalance_time[env_ids] = 0.0
+        self.stair_lift_phase[env_ids] = 0.0
+        self.stair_lift_active[env_ids] = False
+        self.stair_lift_side[env_ids] = 0
+        self.stair_contact_hist[env_ids] = 0.0
+        self.last_stair_ff_signal[env_ids] = 0.0
+        self.last_stair_trigger[env_ids] = 0.0
+        self.stair_followup_used[env_ids] = False
+
+    def step(self, actions):
+        actions = self._apply_stair_feedforward(actions)
+        return super().step(actions)
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_step_contact_state()
         self._update_step_imbalance_state()
+
+    def _get_stair_ff_contact_forces(self):
+        if hasattr(self, "force_sensor_tensor") and torch.is_tensor(self.force_sensor_tensor):
+            contact_forces = torch.norm(self.force_sensor_tensor[:, :, :3], dim=-1)
+        elif hasattr(self, "contact_forces") and hasattr(self, "feet_indices"):
+            contact_forces = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+        else:
+            return None
+
+        if contact_forces.shape[1] < 2:
+            return None
+        return contact_forces[:, :2]
+
+    def _get_stair_ff_gate(self):
+        gate = self.stair_lift_active.any(dim=1)
+        context = self._get_step_lift_context()
+        if context is not None:
+            gate = gate | context[0]
+        return gate.float()
+
+    def _trigger_stair_lift(self, env_mask, side, episode_time, is_followup=False):
+        trigger_mask = env_mask & ~self.stair_lift_active[:, side]
+        if not torch.any(trigger_mask):
+            return
+        if not is_followup:
+            self.stair_followup_used[trigger_mask] = False
+        self.stair_lift_active[trigger_mask, side] = True
+        self.stair_lift_phase[trigger_mask, side] = 0.0
+        self.stair_lift_side[trigger_mask] = side
+        self.last_stair_trigger[trigger_mask, side] = episode_time[trigger_mask] + self.dt
+        if is_followup:
+            self.stair_followup_used[trigger_mask, side] = True
+
+    def _update_stair_feedforward_state(self):
+        if not getattr(self.cfg.control, "stair_ff_enabled", True):
+            self.last_stair_ff_signal.zero_()
+            return
+
+        contact_forces = self._get_stair_ff_contact_forces()
+        if contact_forces is None:
+            self.last_stair_ff_signal.zero_()
+            return
+
+        self.stair_contact_hist = torch.cat(
+            [self.stair_contact_hist[:, :, 1:].clone(), contact_forces.unsqueeze(-1)],
+            dim=2,
+        )
+        smooth_frames = int(getattr(self.cfg.control, "stair_ff_contact_smooth_frames", 3))
+        smooth_frames = max(1, min(smooth_frames, self.stair_contact_hist.shape[2]))
+        smooth_contact = self.stair_contact_hist[:, :, -smooth_frames:].mean(dim=2)
+
+        period = max(getattr(self.cfg.control, "stair_ff_period", 0.65), 1e-6)
+        threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
+        delay = getattr(self.cfg.control, "stair_ff_followup_delay_factor", 0.5) * period
+        episode_time = self.episode_length_buf.float() * self.dt
+
+        contact_hit = smooth_contact > threshold
+        no_lift = ~self.stair_lift_active.any(dim=1)
+        no_contact = ~contact_hit.any(dim=1)
+        clear_mask = no_lift & no_contact
+        self.last_stair_trigger[clear_mask] = 0.0
+        self.stair_followup_used[clear_mask] = False
+
+        both_hit = contact_hit[:, 0] & contact_hit[:, 1]
+        left_stronger = smooth_contact[:, 0] >= smooth_contact[:, 1]
+        no_active = ~self.stair_lift_active.any(dim=1)
+
+        left_first = no_active & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
+        right_first = no_active & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
+        self._trigger_stair_lift(left_first, 0, episode_time)
+        self._trigger_stair_lift(right_first, 1, episode_time)
+
+        left_since_right = episode_time - self.last_stair_trigger[:, 1]
+        right_since_left = episode_time - self.last_stair_trigger[:, 0]
+        followup_available = ~self.stair_followup_used.any(dim=1)
+        left_followup = (
+            ~self.stair_lift_active[:, 0]
+            & (self.last_stair_trigger[:, 1] > 0.0)
+            & followup_available
+            & (((left_since_right >= 0.0) & contact_hit[:, 0]) | (left_since_right >= delay))
+        )
+        right_followup = (
+            ~self.stair_lift_active[:, 1]
+            & (self.last_stair_trigger[:, 0] > 0.0)
+            & followup_available
+            & (((right_since_left >= 0.0) & contact_hit[:, 1]) | (right_since_left >= delay))
+        )
+        self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
+        self._trigger_stair_lift(right_followup, 1, episode_time, is_followup=True)
+
+        self.stair_lift_phase = torch.where(
+            self.stair_lift_active,
+            self.stair_lift_phase + self.dt / period,
+            self.stair_lift_phase,
+        )
+        done = self.stair_lift_phase >= 1.0
+        self.stair_lift_active = self.stair_lift_active & ~done
+        self.stair_lift_phase = torch.where(done, torch.zeros_like(self.stair_lift_phase), self.stair_lift_phase)
+
+        phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
+        signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
+        self.last_stair_ff_signal = signal * self.stair_lift_active.float()
+
+    def _apply_stair_feedforward(self, actions):
+        if not getattr(self.cfg.control, "stair_ff_enabled", True):
+            return actions
+
+        self._update_stair_feedforward_state()
+        return actions
+
+    def _get_stair_ff_joint_target_offsets(self):
+        ff_offset = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        if not getattr(self.cfg.control, "stair_ff_enabled", True):
+            return ff_offset
+        if not torch.any(self.stair_lift_active):
+            return ff_offset
+
+        joint_amplitudes = getattr(self.cfg.control, "stair_ff_joint_amplitudes", {})
+        for joint_name, amplitude in joint_amplitudes.items():
+            if not hasattr(self, "dof_names") or joint_name not in self.dof_names:
+                continue
+            joint_idx = self.dof_names.index(joint_name)
+            if joint_idx in self.foot_joint_indices:
+                continue
+            side = 0 if joint_name.startswith("FL_") else 1 if joint_name.startswith("FR_") else None
+            if side is None:
+                continue
+            ff_offset[:, joint_idx] += self.last_stair_ff_signal[:, side] * amplitude
+
+        k_ff = getattr(self.cfg.control, "stair_ff_k", 0.35)
+        ff_gate = self._get_stair_ff_gate().unsqueeze(1)
+        return ff_gate * k_ff * ff_offset
+
+    def _compute_torques(self, actions):
+        """Compute torques with stair feedforward injected as joint-target offsets."""
+        if self.cfg.control.use_filter:
+            actions = self._low_pass_action_filter(actions)
+
+        actions_scaled = actions * self.cfg.control.action_scale
+        actions_scaled[:, self.hip_joint_indices] *= self.cfg.control.hip_scale_reduction
+
+        if self.cfg.domain_rand.randomize_lag_timesteps:
+            self.lag_buffer = torch.cat([self.lag_buffer[:, 1:, :].clone(), actions_scaled.unsqueeze(1).clone()], dim=1)
+            joint_pos_target = self.lag_buffer[self.num_envs_indexes, self.randomized_lag, :] + self.default_dof_pos
+        else:
+            joint_pos_target = actions_scaled + self.default_dof_pos
+
+        joint_pos_target = joint_pos_target + self._get_stair_ff_joint_target_offsets()
+
+        control_type = self.cfg.control.control_type
+        if control_type == "P":
+            if not self.cfg.domain_rand.randomize_kpkd:
+                torques = self.p_gains * (joint_pos_target - self.dof_pos) - self.d_gains * self.dof_vel
+                torques[:, self.foot_joint_indices] = (
+                    self.p_gains[self.foot_joint_indices] * actions_scaled[:, self.foot_joint_indices]
+                    - self.d_gains[self.foot_joint_indices] * self.dof_vel[:, self.foot_joint_indices]
+                )
+            else:
+                torques = self.kp_factor * self.p_gains * (joint_pos_target - self.dof_pos) - self.kd_factor * self.d_gains * self.dof_vel
+                torques[:, self.foot_joint_indices] = (
+                    self.kp_factor[:, self.foot_joint_indices]
+                    * self.p_gains[self.foot_joint_indices]
+                    * actions_scaled[:, self.foot_joint_indices]
+                    - self.kd_factor[:, self.foot_joint_indices]
+                    * self.d_gains[self.foot_joint_indices]
+                    * self.dof_vel[:, self.foot_joint_indices]
+                )
+        else:
+            raise NameError(f"Unknown controller type: {control_type}")
+        torques *= self.motor_strength
+        return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _update_terrain_curriculum(self, env_ids):
         """Use a stair-specific curriculum instead of pure full-terrain distance."""
@@ -212,6 +403,18 @@ class D1HMoEDisc(D1HMoEBase):
         cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
         return torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
 
+    def _get_active_lift_mask(self, foot_like_tensor):
+        if (
+            not hasattr(self, "stair_lift_active")
+            or not torch.is_tensor(self.stair_lift_active)
+            or foot_like_tensor.shape[1] < 2
+        ):
+            return None
+
+        lift_mask = torch.zeros_like(foot_like_tensor, dtype=torch.bool)
+        lift_mask[:, :2] = self.stair_lift_active[:, :2]
+        return lift_mask
+
     def _get_step_blocking_signal(self):
         context = self._get_step_lift_context()
         contact_norm = self._get_foot_contact_norm()
@@ -307,12 +510,21 @@ class D1HMoEDisc(D1HMoEBase):
         positive_clearance = torch.clamp(foot_clearance, min=0.0)
 
         per_foot_progress = torch.clamp(positive_clearance / target_clearance, 0.0, 1.0)
-        lead_progress = per_foot_progress.max(dim=1).values
-        follow_progress = per_foot_progress.min(dim=1).values
-        forward_score = self._get_step_forward_score()
-        reward = (0.45 * lead_progress + 0.55 * follow_progress) * (0.4 + 0.6 * forward_score)
+        lift_mask = self._get_active_lift_mask(per_foot_progress)
+        if lift_mask is None:
+            return zeros
+        lifting = lift_mask.any(dim=1)
+        if not torch.any(active & lifting):
+            return zeros
 
-        return reward * active.float() * self._get_stair_reward_gate()
+        selected_progress = (per_foot_progress * lift_mask.float()).sum(dim=1) / torch.clamp(
+            lift_mask.float().sum(dim=1),
+            min=1.0,
+        )
+        forward_score = self._get_step_forward_score()
+        reward = selected_progress * (0.4 + 0.6 * forward_score)
+
+        return reward * active.float() * lifting.float() * self._get_stair_posture_gate()
 
     def _reward_step_lift(self):
         """Reward reaching a useful lift height while the front step is active."""
@@ -333,12 +545,21 @@ class D1HMoEDisc(D1HMoEBase):
 
         lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
         per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
-        lead_lift = per_foot_lift.max(dim=1).values
-        follow_lift = per_foot_lift.min(dim=1).values
-        forward_score = self._get_step_forward_score()
-        reward = (0.45 * lead_lift + 0.55 * follow_lift) * (0.4 + 0.6 * forward_score)
+        lift_mask = self._get_active_lift_mask(per_foot_lift)
+        if lift_mask is None:
+            return zeros
+        lifting = lift_mask.any(dim=1)
+        if not torch.any(active & lifting):
+            return zeros
 
-        return reward * active.float() * self._get_stair_reward_gate()
+        selected_lift = (per_foot_lift * lift_mask.float()).sum(dim=1) / torch.clamp(
+            lift_mask.float().sum(dim=1),
+            min=1.0,
+        )
+        forward_score = self._get_step_forward_score()
+        reward = selected_lift * (0.4 + 0.6 * forward_score)
+
+        return reward * active.float() * lifting.float() * self._get_stair_posture_gate()
 
     def _reward_step_pre_lift(self):
         """Small bonus for using height scan to lift before contact."""
@@ -465,7 +686,7 @@ class D1HMoEDisc(D1HMoEBase):
 
         forward_score = self._get_step_forward_score()
 
-        return up_progress * (0.5 + 0.5 * forward_score) * active.float() * self._get_stair_reward_gate()
+        return up_progress * (0.5 + 0.5 * forward_score) * active.float() * self._get_stair_posture_gate()
 
     def _reward_step_success(self):
         """Reward a completed stair transition that is followed by stable travel."""
@@ -517,7 +738,7 @@ class D1HMoEDisc(D1HMoEBase):
 
         height_score = 0.25 * height_ratio + 0.75 * height_complete
         success_score = height_score * base_score * recovery_score * distance_score * time_score
-        return success_score * active.float() * self._get_stair_reward_gate()
+        return success_score * active.float() * self._get_stair_posture_gate()
 
     def _reward_step_stall(self):
         """Penalize stopping at the step edge instead of attempting to climb."""
@@ -532,7 +753,14 @@ class D1HMoEDisc(D1HMoEBase):
 
         min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
         stall_score = torch.clamp((min_speed - self.base_lin_vel[:, 0]) / max(min_speed, 1e-6), 0.0, 1.0)
-        return stall_score * active.float() * self._get_stair_reward_gate()
+        stalled = self.base_lin_vel[:, 0] < min_speed
+        return (active & stalled).float() * self._get_stair_posture_gate()
+
+    def _reward_opposite_base_vel(self):
+        cmd_x = self.commands[:, 0]
+        backward = (cmd_x > 0.05) & (self.base_lin_vel[:, 0] < -0.03)
+        penalty = torch.clamp(-self.base_lin_vel[:, 0] / torch.clamp(cmd_x, min=0.05), 0.0, 1.0)
+        return backward.float() * penalty
 
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
@@ -593,6 +821,20 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         motor_strength_range = [1.0, 1.0]
         randomize_lag_timesteps = False
         lag_timesteps = 2
+
+    class control(D1HMoEBaseCfg.control):
+        stair_ff_enabled = True
+        stair_ff_period = 0.65
+        stair_ff_k = 1.0
+        stair_ff_contact_threshold = 50.0
+        stair_ff_followup_delay_factor = 0.5
+        stair_ff_contact_smooth_frames = 3
+        stair_ff_joint_amplitudes = {
+            "FL_thigh_joint": 0.30,
+            "FL_calf_joint": -0.60,
+            "FR_thigh_joint": 0.30,
+            "FR_calf_joint": -0.60,
+        }
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
@@ -717,13 +959,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_clearance = 1.0
             step_lift = 2.0
             step_pre_lift = 0.0
-            step_reactive_lift = 8.0
+            step_reactive_lift = 0.0
             step_leg_imbalance = -25.0
             step_progress = 18.0
             step_up = 60.0
             step_success = 80.0
             step_stall = -8.0
             step_bump = -20.0
+            opposite_base_vel = -20.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
