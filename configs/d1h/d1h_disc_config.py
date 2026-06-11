@@ -207,6 +207,11 @@ class D1HMoEDisc(D1HMoEBase):
             return None
         return torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
 
+    def _get_step_forward_score(self):
+        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
+        return torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
+
     def _get_step_blocking_signal(self):
         context = self._get_step_lift_context()
         contact_norm = self._get_foot_contact_norm()
@@ -304,7 +309,8 @@ class D1HMoEDisc(D1HMoEBase):
         per_foot_progress = torch.clamp(positive_clearance / target_clearance, 0.0, 1.0)
         lead_progress = per_foot_progress.max(dim=1).values
         follow_progress = per_foot_progress.min(dim=1).values
-        reward = 0.45 * lead_progress + 0.55 * follow_progress
+        forward_score = self._get_step_forward_score()
+        reward = (0.45 * lead_progress + 0.55 * follow_progress) * (0.4 + 0.6 * forward_score)
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -329,7 +335,8 @@ class D1HMoEDisc(D1HMoEBase):
         per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
         lead_lift = per_foot_lift.max(dim=1).values
         follow_lift = per_foot_lift.min(dim=1).values
-        reward = 0.45 * lead_lift + 0.55 * follow_lift
+        forward_score = self._get_step_forward_score()
+        reward = (0.45 * lead_lift + 0.55 * follow_lift) * (0.4 + 0.6 * forward_score)
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -394,11 +401,9 @@ class D1HMoEDisc(D1HMoEBase):
         unload_high = getattr(self.cfg.rewards, "step_reactive_unload_force_high", 300.0)
         unload_score = 1.0 - torch.clamp((max_contact - unload_low) / max(unload_high - unload_low, 1e-6), 0.0, 1.0)
 
-        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
-        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
-        forward_score = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
+        forward_score = self._get_step_forward_score()
 
-        reward = 0.70 * lift_progress + 0.05 * unload_score + 0.25 * forward_score
+        reward = lift_progress * (0.25 + 0.75 * forward_score) * (0.5 + 0.5 * unload_score)
         return reward * active.float() * recent_contact.float() * self._get_stair_reward_gate()
 
     def _reward_step_leg_imbalance(self):
@@ -440,9 +445,7 @@ class D1HMoEDisc(D1HMoEBase):
         if not torch.any(active):
             return zeros
 
-        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
-        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
-        progress = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
+        progress = self._get_step_forward_score()
         return progress * active.float() * self._get_stair_reward_gate()
 
     def _reward_step_up(self):
@@ -460,9 +463,7 @@ class D1HMoEDisc(D1HMoEBase):
         height_scale = torch.clamp(torch.maximum(obstacle_height, climbed_height), min=min_height)
         up_progress = torch.clamp(climbed_height / height_scale, 0.0, 1.0)
 
-        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
-        cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
-        forward_score = torch.clamp(self.base_lin_vel[:, 0] / cmd_x, 0.0, 1.0)
+        forward_score = self._get_step_forward_score()
 
         return up_progress * (0.5 + 0.5 * forward_score) * active.float() * self._get_stair_reward_gate()
 
@@ -493,8 +494,7 @@ class D1HMoEDisc(D1HMoEBase):
             1.0,
         )
 
-        min_speed = getattr(self.cfg.rewards, "step_success_min_speed", 0.12)
-        speed_score = torch.clamp(self.base_lin_vel[:, 0] / max(min_speed, 1e-6), 0.0, 1.0)
+        speed_score = self._get_step_forward_score()
         recovery_score = 0.5 + 0.5 * speed_score
 
         distance = torch.norm(self.root_states[:, :2] - self.env_origins[:, :2], dim=1)
@@ -531,8 +531,8 @@ class D1HMoEDisc(D1HMoEBase):
             return zeros
 
         min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
-        stalled = self.base_lin_vel[:, 0] < min_speed
-        return (active & stalled).float() * self._get_stair_reward_gate()
+        stall_score = torch.clamp((min_speed - self.base_lin_vel[:, 0]) / max(min_speed, 1e-6), 0.0, 1.0)
+        return stall_score * active.float() * self._get_stair_reward_gate()
 
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
@@ -620,7 +620,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_min_height = 0.08
         step_lift_margin = 0.09
         step_lift_sigma = 0.07
-        step_stall_min_speed = 0.08
+        step_stall_min_speed = 0.12
         step_pre_lift_min_height = 0.08
         step_pre_lift_margin = 0.09
         step_pre_lift_sigma = 0.05
@@ -664,7 +664,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             tracking_lin_vel = 0.0
             # Keep only a weak forward guardrail. Y/yaw rewards were mostly free
             # bonuses with zero commands, so they hide the real stair signal.
-            tracking_lin_vel_x = 8.0
+            tracking_lin_vel_x = 10.0
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 0.0
             heading = -2.0
@@ -714,15 +714,15 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
-            step_clearance = 2.0
-            step_lift = 5.0
+            step_clearance = 1.0
+            step_lift = 2.0
             step_pre_lift = 0.0
-            step_reactive_lift = 25.0
+            step_reactive_lift = 8.0
             step_leg_imbalance = -25.0
-            step_progress = 3.0
-            step_up = 25.0
-            step_success = 35.0
-            step_stall = 0.0
+            step_progress = 18.0
+            step_up = 60.0
+            step_success = 80.0
+            step_stall = -8.0
             step_bump = -20.0
 
     class normalization(D1HMoEBaseCfg.normalization):
@@ -750,8 +750,8 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         entropy_coef = 0.001
         residual_l2_coef = 0.05
         learning_rate = 3.0e-4
-        learning_rate_min = 5.0e-5
-        learning_rate_max = 6.0e-3
+        learning_rate_min = 9.0e-5
+        learning_rate_max = 9.0e-3
         schedule = "adaptive"
         desired_kl = 0.01
         gamma = 0.995
