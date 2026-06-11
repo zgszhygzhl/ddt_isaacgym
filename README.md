@@ -39,6 +39,9 @@ tmux attach -t d1h_train
 python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
+  --resume \
+  --load_run Jun11_13-14-56_ \
+  --checkpoint 2800 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \

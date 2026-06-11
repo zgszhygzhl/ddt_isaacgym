@@ -569,12 +569,12 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.25
         curriculum_move_down_min_distance = 0.8
-        curriculum_success_reward_threshold = 0.60
-        curriculum_success_down_threshold = 0.15
+        curriculum_success_reward_threshold = 6.0
+        curriculum_success_down_threshold = 2.0
         curriculum_success_min_distance = 2.4
         curriculum_success_min_episode_time = 12.0
         curriculum_allow_distance_promotion = False
-        curriculum_max_terrain_level = 1
+        curriculum_max_terrain_level = 6
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -672,14 +672,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -14.0
             upward = 0.0
-            ang_vel_xy = -0.10
-            base_height = -3.0
+            ang_vel_xy = -0.20
+            base_height = -4.0
             lin_vel_z = -0.3
 
             # Failure/contact penalties.
             termination = -400.0
             collision = -12.0
-            collision_hard = -60.0
+            collision_hard = -90.0
             collision_head = 0.0
 
             # Remove tiny regularizers that only add noise to the scalar reward.
@@ -707,7 +707,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Disable weak geometry priors until the stair skill exists.
             body_pos_to_feet_x = 0.0
-            body_feet_distance_x = -2.5
+            body_feet_distance_x = -8.0
             body_feet_distance_y = 0.0
             body_symmetry_y = 0.0
             body_symmetry_z = 0.0
