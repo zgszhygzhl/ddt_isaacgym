@@ -43,15 +43,32 @@ class D1HMoEDisc(D1HMoEBase):
 
     def _get_stair_ff_contact_forces(self):
         if hasattr(self, "force_sensor_tensor") and torch.is_tensor(self.force_sensor_tensor):
-            contact_forces = torch.norm(self.force_sensor_tensor[:, :, :3], dim=-1)
+            contact_force_vec = self.force_sensor_tensor[:, :, :3]
         elif hasattr(self, "contact_forces") and hasattr(self, "feet_indices"):
-            contact_forces = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+            contact_force_vec = self.contact_forces[:, self.feet_indices, :]
         else:
             return None
 
-        if contact_forces.shape[1] < 2:
+        if contact_force_vec.shape[1] < 2:
             return None
+
+        force_axis = getattr(self.cfg.control, "stair_ff_contact_force_axis", "horizontal")
+        if force_axis == "horizontal":
+            contact_forces = torch.norm(contact_force_vec[:, :, :2], dim=-1)
+        elif force_axis == "vertical":
+            contact_forces = torch.abs(contact_force_vec[:, :, 2])
+        else:
+            contact_forces = torch.norm(contact_force_vec, dim=-1)
         return contact_forces[:, :2]
+
+    def _get_stair_ff_trigger_arm(self):
+        if not getattr(self.cfg.control, "stair_ff_require_step_context", True):
+            return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        return context[0]
 
     def _get_stair_ff_gate(self):
         gate = self.stair_lift_active.any(dim=1)
@@ -96,10 +113,11 @@ class D1HMoEDisc(D1HMoEBase):
         delay = getattr(self.cfg.control, "stair_ff_followup_delay_factor", 0.5) * period
         episode_time = self.episode_length_buf.float() * self.dt
 
-        contact_hit = smooth_contact > threshold
+        trigger_arm = self._get_stair_ff_trigger_arm()
+        contact_hit = (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
         no_lift = ~self.stair_lift_active.any(dim=1)
         no_contact = ~contact_hit.any(dim=1)
-        clear_mask = no_lift & no_contact
+        clear_mask = no_lift & (no_contact | ~trigger_arm)
         self.last_stair_trigger[clear_mask] = 0.0
         self.stair_followup_used[clear_mask] = False
 
@@ -827,6 +845,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_period = 0.65
         stair_ff_k = 1.0
         stair_ff_contact_threshold = 50.0
+        stair_ff_contact_force_axis = "horizontal"
+        stair_ff_require_step_context = True
         stair_ff_followup_delay_factor = 0.5
         stair_ff_contact_smooth_frames = 3
         stair_ff_joint_amplitudes = {
