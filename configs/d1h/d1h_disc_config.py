@@ -8,15 +8,18 @@ class D1HMoEDisc(D1HMoEBase):
         super()._init_buffers()
         self.step_contact_timer = torch.zeros(self.num_envs, device=self.device)
         self.step_jam_time = torch.zeros(self.num_envs, device=self.device)
+        self.step_imbalance_time = torch.zeros(self.num_envs, device=self.device)
 
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
         self.step_contact_timer[env_ids] = 0.0
         self.step_jam_time[env_ids] = 0.0
+        self.step_imbalance_time[env_ids] = 0.0
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_step_contact_state()
+        self._update_step_imbalance_state()
 
     def _update_terrain_curriculum(self, env_ids):
         """Use a stair-specific curriculum instead of pure full-terrain distance."""
@@ -213,9 +216,9 @@ class D1HMoEDisc(D1HMoEBase):
         active, obstacle_height, foot_clearance, zeros = context
         margin = getattr(self.cfg.rewards, "step_block_clearance_margin", 0.04)
         target_clearance = torch.clamp(obstacle_height + margin, min=0.04)
-        max_clearance = torch.clamp(foot_clearance.max(dim=1).values, min=0.0)
+        support_clearance = torch.clamp(foot_clearance.min(dim=1).values, min=0.0)
         low_clearance = torch.clamp(
-            (target_clearance - max_clearance) / torch.clamp(target_clearance, min=0.04),
+            (target_clearance - support_clearance) / torch.clamp(target_clearance, min=0.04),
             0.0,
             1.0,
         )
@@ -246,6 +249,41 @@ class D1HMoEDisc(D1HMoEBase):
         )
         self.step_jam_time = torch.where(jammed, self.step_jam_time + self.dt, torch.zeros_like(self.step_jam_time))
 
+    def _get_step_leg_imbalance_signal(self):
+        context = self._get_step_lift_context()
+        if context is None:
+            return None
+
+        active, obstacle_height, foot_clearance, zeros = context
+        margin = getattr(self.cfg.rewards, "step_lift_margin", 0.06)
+        target_lift = torch.clamp(obstacle_height + margin, min=0.05).unsqueeze(1)
+        per_foot_progress = torch.clamp(torch.clamp(foot_clearance, min=0.0) / target_lift, 0.0, 1.0)
+        lead_progress = per_foot_progress.max(dim=1).values
+        follow_progress = per_foot_progress.min(dim=1).values
+        imbalance_start = getattr(self.cfg.rewards, "step_leg_imbalance_start", 0.35)
+        imbalance = torch.clamp(
+            (lead_progress - follow_progress - imbalance_start) / max(1.0 - imbalance_start, 1e-6),
+            0.0,
+            1.0,
+        )
+        return active, imbalance, lead_progress, zeros
+
+    def _update_step_imbalance_state(self):
+        signal = self._get_step_leg_imbalance_signal()
+        if signal is None:
+            self.step_imbalance_time.zero_()
+            return
+
+        active, imbalance, lead_progress, _ = signal
+        trigger = getattr(self.cfg.rewards, "step_leg_imbalance_trigger", 0.25)
+        high_leg = getattr(self.cfg.rewards, "step_leg_imbalance_min_lead", 0.65)
+        bad_imbalance = active & (imbalance > trigger) & (lead_progress > high_leg)
+        self.step_imbalance_time = torch.where(
+            bad_imbalance,
+            self.step_imbalance_time + self.dt,
+            torch.zeros_like(self.step_imbalance_time),
+        )
+
     def _reward_step_clearance(self):
         """Reward useful wheel/foot clearance when a front up-step is detected."""
 
@@ -265,9 +303,8 @@ class D1HMoEDisc(D1HMoEBase):
 
         per_foot_progress = torch.clamp(positive_clearance / target_clearance, 0.0, 1.0)
         lead_progress = per_foot_progress.max(dim=1).values
-        support_progress = per_foot_progress.min(dim=1).values
-        single_leg_lead = lead_progress * (1.0 - support_progress)
-        reward = 0.70 * lead_progress + 0.30 * single_leg_lead
+        follow_progress = per_foot_progress.min(dim=1).values
+        reward = 0.45 * lead_progress + 0.55 * follow_progress
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -291,9 +328,8 @@ class D1HMoEDisc(D1HMoEBase):
         lift_error = torch.clamp(target_lift.unsqueeze(1) - positive_clearance, min=0.0)
         per_foot_lift = torch.exp(-torch.square(lift_error / sigma))
         lead_lift = per_foot_lift.max(dim=1).values
-        support_lift = per_foot_lift.min(dim=1).values
-        single_leg_lift = torch.clamp(lead_lift - support_lift, min=0.0)
-        reward = 0.75 * lead_lift + 0.25 * single_leg_lift
+        follow_lift = per_foot_lift.min(dim=1).values
+        reward = 0.45 * lead_lift + 0.55 * follow_lift
 
         return reward * active.float() * self._get_stair_reward_gate()
 
@@ -351,9 +387,8 @@ class D1HMoEDisc(D1HMoEBase):
         positive_clearance = torch.clamp(foot_clearance, min=0.0)
         per_foot_progress = torch.clamp(positive_clearance / torch.clamp(target_lift.unsqueeze(1), min=0.04), 0.0, 1.0)
         lead_progress = per_foot_progress.max(dim=1).values
-        support_progress = per_foot_progress.min(dim=1).values
-        single_leg_lead = lead_progress * (1.0 - support_progress)
-        lift_progress = 0.75 * lead_progress + 0.25 * single_leg_lead
+        follow_progress = per_foot_progress.min(dim=1).values
+        lift_progress = 0.45 * lead_progress + 0.55 * follow_progress
 
         unload_low = getattr(self.cfg.rewards, "step_reactive_unload_force_low", 80.0)
         unload_high = getattr(self.cfg.rewards, "step_reactive_unload_force_high", 300.0)
@@ -365,6 +400,26 @@ class D1HMoEDisc(D1HMoEBase):
 
         reward = 0.70 * lift_progress + 0.05 * unload_score + 0.25 * forward_score
         return reward * active.float() * recent_contact.float() * self._get_stair_reward_gate()
+
+    def _reward_step_leg_imbalance(self):
+        """Penalize camping with one leg high while the other leg never follows."""
+
+        signal = self._get_step_leg_imbalance_signal()
+        if signal is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, imbalance, lead_progress, zeros = signal
+        if not torch.any(active):
+            return zeros
+
+        grace_time = getattr(self.cfg.rewards, "step_leg_imbalance_grace_time", 0.25)
+        time_scale = getattr(self.cfg.rewards, "step_leg_imbalance_time_scale", 0.35)
+        time_gate = torch.clamp(
+            (self.step_imbalance_time - grace_time) / max(time_scale, 1e-6),
+            0.0,
+            1.0,
+        )
+        return imbalance * lead_progress * time_gate * active.float() * self._get_stair_posture_gate()
 
     def _reward_step_bump(self):
         """Penalize sustained jamming, not the first probing contact."""
@@ -577,43 +632,48 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_reactive_lift_margin = 0.07
         step_reactive_unload_force_low = 120.0
         step_reactive_unload_force_high = 450.0
-        step_jam_force_threshold = 450.0
-        step_jam_clearance_ratio = 0.45
+        step_jam_force_threshold = 300.0
+        step_jam_clearance_ratio = 0.30
         step_jam_min_speed = 0.08
-        step_jam_grace_time = 0.25
-        step_jam_time_scale = 0.35
-        stair_gate_upright_min = 0.70
-        stair_gate_base_height_min = 0.28
-        stair_gate_base_height_full = 0.40
+        step_jam_grace_time = 0.15
+        step_jam_time_scale = 0.25
+        stair_gate_upright_min = 0.80
+        stair_gate_base_height_min = 0.34
+        stair_gate_base_height_full = 0.45
         stair_gate_bad_contact_force = 5.0
         step_success_rear_x_min = -0.75
         step_success_rear_x_max = -0.20
         step_success_min_height = 0.025
         step_success_start_ratio = 0.35
         step_success_complete_ratio = 0.70
-        step_success_min_base_height = 0.30
-        step_success_full_base_height = 0.40
+        step_success_min_base_height = 0.36
+        step_success_full_base_height = 0.46
         step_success_min_speed = 0.10
         step_success_min_distance = 1.0
         step_success_full_distance = 2.2
         step_success_min_time = 3.0
         step_success_full_time = 8.0
+        step_leg_imbalance_start = 0.35
+        step_leg_imbalance_trigger = 0.25
+        step_leg_imbalance_min_lead = 0.65
+        step_leg_imbalance_grace_time = 0.25
+        step_leg_imbalance_time_scale = 0.35
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
             tracking_lin_vel = 0.0
             # Keep only a weak forward guardrail. Y/yaw rewards were mostly free
             # bonuses with zero commands, so they hide the real stair signal.
-            tracking_lin_vel_x = 10.0
+            tracking_lin_vel_x = 8.0
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 0.0
             heading = -2.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
-            orientation = -8.0
+            orientation = -14.0
             upward = 0.0
-            ang_vel_xy = -0.05
-            base_height = -1.0
+            ang_vel_xy = -0.10
+            base_height = -3.0
             lin_vel_z = -0.3
 
             # Failure/contact penalties.
@@ -647,7 +707,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Disable weak geometry priors until the stair skill exists.
             body_pos_to_feet_x = 0.0
-            body_feet_distance_x = 0.0
+            body_feet_distance_x = -2.5
             body_feet_distance_y = 0.0
             body_symmetry_y = 0.0
             body_symmetry_z = 0.0
@@ -655,14 +715,15 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 2.0
-            step_lift = 6.0
+            step_lift = 5.0
             step_pre_lift = 0.0
-            step_reactive_lift = 45.0
-            step_progress = 0.0
-            step_up = 35.0
-            step_success = 45.0
-            step_stall = -8.0
-            step_bump = -40.0
+            step_reactive_lift = 25.0
+            step_leg_imbalance = -25.0
+            step_progress = 3.0
+            step_up = 25.0
+            step_success = 35.0
+            step_stall = 0.0
+            step_bump = -20.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
