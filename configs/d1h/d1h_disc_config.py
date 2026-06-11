@@ -569,8 +569,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.25
         curriculum_move_down_min_distance = 0.8
-        curriculum_success_reward_threshold = 6.0
-        curriculum_success_down_threshold = 2.0
+        curriculum_success_reward_threshold = 4.0
+        curriculum_success_down_threshold = 1.5
         curriculum_success_min_distance = 2.4
         curriculum_success_min_episode_time = 12.0
         curriculum_allow_distance_promotion = False
