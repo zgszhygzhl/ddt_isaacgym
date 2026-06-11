@@ -68,7 +68,22 @@ class D1HMoEDisc(D1HMoEBase):
         context = self._get_step_lift_context()
         if context is None:
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        return context[0]
+
+        arm = context[0]
+        min_travel = getattr(self.cfg.control, "stair_ff_min_forward_travel", 0.15)
+        if min_travel > 0.0:
+            forward_travel = self.root_states[:, 0] - self.env_origins[:, 0]
+            arm = arm & (forward_travel >= min_travel)
+
+        if getattr(self.cfg.control, "stair_ff_require_blocking", True):
+            min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+            cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
+            speed_fraction = getattr(self.cfg.control, "stair_ff_blocking_speed_fraction", 0.65)
+            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.22)
+            blocking_speed = torch.minimum(cmd_x * speed_fraction, torch.full_like(cmd_x, speed_max))
+            arm = arm & (self.base_lin_vel[:, 0] < blocking_speed)
+
+        return arm
 
     def _get_stair_ff_gate(self):
         gate = self.stair_lift_active.any(dim=1)
@@ -844,9 +859,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_enabled = True
         stair_ff_period = 0.65
         stair_ff_k = 1.0
-        stair_ff_contact_threshold = 50.0
+        stair_ff_contact_threshold = 120.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_require_step_context = True
+        stair_ff_min_forward_travel = 0.15
+        stair_ff_require_blocking = True
+        stair_ff_blocking_speed_fraction = 0.65
+        stair_ff_blocking_speed_max = 0.22
         stair_ff_followup_delay_factor = 0.5
         stair_ff_contact_smooth_frames = 3
         stair_ff_joint_amplitudes = {
