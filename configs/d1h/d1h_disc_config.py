@@ -974,13 +974,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             orientation = -14.0
             upward = 0.0
             ang_vel_xy = -0.20
-            base_height = -4.0
+            base_height = -7.5
             lin_vel_z = -0.3
 
             # Failure/contact penalties.
             termination = -400.0
-            collision = -12.0
-            collision_hard = -90.0
+            collision = -16.0
+            collision_hard = -125.0
             collision_head = 0.0
 
             # Remove tiny regularizers that only add noise to the scalar reward.
@@ -1020,12 +1020,12 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
             step_leg_imbalance = -8.0
-            step_progress = 18.0
+            step_progress = 15.0
             step_up = 60.0
             step_success = 80.0
-            step_stall = -8.0
+            step_stall = -12.0
             step_bump = -20.0
-            opposite_base_vel = -35.0
+            opposite_base_vel = -48.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded

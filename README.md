@@ -40,8 +40,8 @@ python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --resume \
-  --load_run Jun11_23-16-44_ \
-  --checkpoint 4200 \
+  --load_run Jun12_11-25-56_ \
+  --checkpoint 9000 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
