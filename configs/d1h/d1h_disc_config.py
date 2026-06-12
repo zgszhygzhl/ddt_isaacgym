@@ -29,6 +29,7 @@ class D1HMoEDisc(D1HMoEBase):
             debug_episode["stair_ff_trigger_arm_ratio"] = torch.mean(self.stair_ff_trigger_arm_sum[env_ids] / denom)
             debug_episode["stair_ff_contact_hit_ratio"] = torch.mean(self.stair_ff_contact_hit_sum[env_ids] / denom)
             debug_episode["stair_ff_active_ratio"] = torch.mean(self.stair_ff_active_sum[env_ids] / denom)
+            debug_episode["stair_ff_anneal_scale"] = self._get_stair_ff_anneal_scale()
 
         super().reset_idx(env_ids)
         if len(debug_episode) > 0 and "episode" in self.extras:
@@ -107,6 +108,23 @@ class D1HMoEDisc(D1HMoEBase):
         if context is not None:
             gate = gate | context[0]
         return gate.float()
+
+    def _get_stair_ff_anneal_scale(self):
+        if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
+            return torch.ones((), device=self.device)
+
+        steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
+        train_iter = torch.as_tensor(
+            float(getattr(self, "common_step_counter", 0)) / steps_per_iter,
+            device=self.device,
+        )
+        start_iter = float(getattr(self.cfg.control, "stair_ff_anneal_start_iter", 0.0))
+        end_iter = float(getattr(self.cfg.control, "stair_ff_anneal_end_iter", start_iter + 1.0))
+        final_scale = float(getattr(self.cfg.control, "stair_ff_anneal_final_scale", 0.0))
+
+        progress = torch.clamp((train_iter - start_iter) / max(end_iter - start_iter, 1e-6), 0.0, 1.0)
+        cosine_scale = 0.5 * (1.0 + torch.cos(math.pi * progress))
+        return final_scale + (1.0 - final_scale) * cosine_scale
 
     def _trigger_stair_lift(self, env_mask, side, episode_time, is_followup=False):
         trigger_mask = env_mask & ~self.stair_lift_active[:, side]
@@ -222,8 +240,9 @@ class D1HMoEDisc(D1HMoEBase):
             ff_offset[:, joint_idx] += self.last_stair_ff_signal[:, side] * amplitude
 
         k_ff = getattr(self.cfg.control, "stair_ff_k", 0.35)
+        anneal_scale = self._get_stair_ff_anneal_scale()
         ff_gate = self._get_stair_ff_gate().unsqueeze(1)
-        return ff_gate * k_ff * ff_offset
+        return ff_gate * k_ff * anneal_scale * ff_offset
 
     def _compute_torques(self, actions):
         """Compute torques with stair feedforward injected as joint-target offsets."""
@@ -884,8 +903,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_require_blocking = True
         stair_ff_blocking_speed_fraction = 0.65
         stair_ff_blocking_speed_max = 0.22
-        stair_ff_followup_delay_factor = 0.5
+        stair_ff_followup_delay_factor = 0.35
         stair_ff_contact_smooth_frames = 3
+        stair_ff_anneal_enabled = True
+        stair_ff_anneal_start_iter = 1000
+        stair_ff_anneal_end_iter = 9000
+        stair_ff_anneal_final_scale = 0.0
+        stair_ff_anneal_steps_per_iter = 32
         stair_ff_joint_amplitudes = {
             "FL_thigh_joint": 0.30,
             "FL_calf_joint": -0.60,
@@ -1008,7 +1032,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Disable weak geometry priors until the stair skill exists.
             body_pos_to_feet_x = 0.0
-            body_feet_distance_x = -2.0
+            body_feet_distance_x = -8.0
             body_feet_distance_y = 0.0
             body_symmetry_y = 0.0
             body_symmetry_z = 0.0
