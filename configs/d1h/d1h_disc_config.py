@@ -18,9 +18,22 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_ff_signal = torch.zeros(self.num_envs, 2, device=self.device)
         self.last_stair_trigger = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_followup_used = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+        self.stair_ff_trigger_arm_sum = torch.zeros(self.num_envs, device=self.device)
+        self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
+        self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
 
     def reset_idx(self, env_ids):
+        debug_episode = {}
+        if len(env_ids) > 0 and hasattr(self, "stair_ff_trigger_arm_sum"):
+            denom = torch.clamp(self.episode_length_buf[env_ids].float(), min=1.0)
+            debug_episode["stair_ff_trigger_arm_ratio"] = torch.mean(self.stair_ff_trigger_arm_sum[env_ids] / denom)
+            debug_episode["stair_ff_contact_hit_ratio"] = torch.mean(self.stair_ff_contact_hit_sum[env_ids] / denom)
+            debug_episode["stair_ff_active_ratio"] = torch.mean(self.stair_ff_active_sum[env_ids] / denom)
+
         super().reset_idx(env_ids)
+        if len(debug_episode) > 0 and "episode" in self.extras:
+            self.extras["episode"].update(debug_episode)
+
         self.step_contact_timer[env_ids] = 0.0
         self.step_jam_time[env_ids] = 0.0
         self.step_imbalance_time[env_ids] = 0.0
@@ -31,6 +44,9 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_ff_signal[env_ids] = 0.0
         self.last_stair_trigger[env_ids] = 0.0
         self.stair_followup_used[env_ids] = False
+        self.stair_ff_trigger_arm_sum[env_ids] = 0.0
+        self.stair_ff_contact_hit_sum[env_ids] = 0.0
+        self.stair_ff_active_sum[env_ids] = 0.0
 
     def step(self, actions):
         actions = self._apply_stair_feedforward(actions)
@@ -130,6 +146,8 @@ class D1HMoEDisc(D1HMoEBase):
 
         trigger_arm = self._get_stair_ff_trigger_arm()
         contact_hit = (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
+        self.stair_ff_trigger_arm_sum += trigger_arm.float()
+        self.stair_ff_contact_hit_sum += contact_hit.any(dim=1).float()
         no_lift = ~self.stair_lift_active.any(dim=1)
         no_contact = ~contact_hit.any(dim=1)
         clear_mask = no_lift & (no_contact | ~trigger_arm)
@@ -175,6 +193,7 @@ class D1HMoEDisc(D1HMoEBase):
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
         self.last_stair_ff_signal = signal * self.stair_lift_active.float()
+        self.stair_ff_active_sum += self.stair_lift_active.any(dim=1).float()
 
     def _apply_stair_feedforward(self, actions):
         if not getattr(self.cfg.control, "stair_ff_enabled", True):
@@ -751,26 +770,25 @@ class D1HMoEDisc(D1HMoEBase):
         speed_score = self._get_step_forward_score()
         recovery_score = 0.5 + 0.5 * speed_score
 
-        distance = torch.norm(self.root_states[:, :2] - self.env_origins[:, :2], dim=1)
-        min_distance = getattr(self.cfg.rewards, "step_success_min_distance", 1.0)
-        full_distance = getattr(self.cfg.rewards, "step_success_full_distance", 2.0)
-        distance_score = torch.clamp(
-            (distance - min_distance) / max(full_distance - min_distance, 1e-6),
-            0.0,
-            1.0,
+        x_progress = self.root_states[:, 0] - self.env_origins[:, 0]
+        min_x_progress = getattr(
+            self.cfg.rewards,
+            "step_success_min_x_progress",
+            getattr(self.cfg.rewards, "step_success_min_distance", 1.0),
         )
-
-        episode_time = self.episode_length_buf.float() * self.dt
-        min_time = getattr(self.cfg.rewards, "step_success_min_time", 3.0)
-        full_time = getattr(self.cfg.rewards, "step_success_full_time", 8.0)
-        time_score = torch.clamp(
-            (episode_time - min_time) / max(full_time - min_time, 1e-6),
+        full_x_progress = getattr(
+            self.cfg.rewards,
+            "step_success_full_x_progress",
+            getattr(self.cfg.rewards, "step_success_full_distance", 2.0),
+        )
+        x_progress_score = torch.clamp(
+            (x_progress - min_x_progress) / max(full_x_progress - min_x_progress, 1e-6),
             0.0,
             1.0,
         )
 
         height_score = 0.25 * height_ratio + 0.75 * height_complete
-        success_score = height_score * base_score * recovery_score * distance_score * time_score
+        success_score = height_score * base_score * recovery_score * x_progress_score
         return success_score * active.float() * self._get_stair_posture_gate()
 
     def _reward_step_stall(self):
@@ -859,7 +877,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_enabled = True
         stair_ff_period = 0.65
         stair_ff_k = 1.0
-        stair_ff_contact_threshold = 120.0
+        stair_ff_contact_threshold = 100.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_require_step_context = True
         stair_ff_min_forward_travel = 0.15
@@ -918,20 +936,22 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_jam_min_speed = 0.08
         step_jam_grace_time = 0.15
         step_jam_time_scale = 0.25
-        stair_gate_upright_min = 0.80
-        stair_gate_base_height_min = 0.34
-        stair_gate_base_height_full = 0.45
+        stair_gate_upright_min = 0.65
+        stair_gate_base_height_min = 0.28
+        stair_gate_base_height_full = 0.40
         stair_gate_bad_contact_force = 5.0
         step_success_rear_x_min = -0.75
         step_success_rear_x_max = -0.20
         step_success_min_height = 0.025
         step_success_start_ratio = 0.35
         step_success_complete_ratio = 0.70
-        step_success_min_base_height = 0.36
-        step_success_full_base_height = 0.46
+        step_success_min_base_height = 0.30
+        step_success_full_base_height = 0.42
         step_success_min_speed = 0.10
         step_success_min_distance = 1.0
         step_success_full_distance = 2.2
+        step_success_min_x_progress = 1.0
+        step_success_full_x_progress = 2.2
         step_success_min_time = 3.0
         step_success_full_time = 8.0
         step_leg_imbalance_start = 0.35
@@ -988,7 +1008,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Disable weak geometry priors until the stair skill exists.
             body_pos_to_feet_x = 0.0
-            body_feet_distance_x = -8.0
+            body_feet_distance_x = -2.0
             body_feet_distance_y = 0.0
             body_symmetry_y = 0.0
             body_symmetry_z = 0.0
@@ -999,13 +1019,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_lift = 2.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
-            step_leg_imbalance = -25.0
+            step_leg_imbalance = -8.0
             step_progress = 18.0
             step_up = 60.0
             step_success = 80.0
             step_stall = -8.0
             step_bump = -20.0
-            opposite_base_vel = -20.0
+            opposite_base_vel = -35.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
