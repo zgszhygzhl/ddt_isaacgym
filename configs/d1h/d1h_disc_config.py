@@ -96,7 +96,7 @@ class D1HMoEDisc(D1HMoEBase):
             min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
             cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
             speed_fraction = getattr(self.cfg.control, "stair_ff_blocking_speed_fraction", 0.65)
-            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.22)
+            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.30)
             blocking_speed = torch.minimum(cmd_x * speed_fraction, torch.full_like(cmd_x, speed_max))
             arm = arm & (self.base_lin_vel[:, 0] < blocking_speed)
 
@@ -907,7 +907,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_min_forward_travel = 0.15
         stair_ff_require_blocking = True
         stair_ff_blocking_speed_fraction = 0.65
-        stair_ff_blocking_speed_max = 0.22
+        stair_ff_blocking_speed_max = 0.30
         stair_ff_followup_delay_factor = 0.35
         stair_ff_contact_smooth_frames = 3
         stair_ff_anneal_enabled = True
