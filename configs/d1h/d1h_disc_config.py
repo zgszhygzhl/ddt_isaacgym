@@ -118,8 +118,9 @@ class D1HMoEDisc(D1HMoEBase):
             return torch.ones((), device=self.device)
 
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
+        iter_offset = float(getattr(self.cfg.control, "stair_ff_anneal_iter_offset", 0.0))
         train_iter = torch.as_tensor(
-            float(getattr(self, "common_step_counter", 0)) / steps_per_iter,
+            float(getattr(self, "common_step_counter", 0)) / steps_per_iter + iter_offset,
             device=self.device,
         )
         start_iter = float(getattr(self.cfg.control, "stair_ff_anneal_start_iter", 0.0))
@@ -853,7 +854,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
         class ranges:
             # Values below 0.2 are zeroed by the base command sampler.
-            lin_vel_x = [0.32, 0.44]
+            lin_vel_x = [0.28, 0.62]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [0.0, 0.0]
             heading = [0.0, 0.0]
@@ -861,22 +862,22 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class terrain(D1HMoEBaseCfg.terrain):
         # Stage 1: only clean up-stairs, starting at the easiest row.
         curriculum = True
-        max_init_terrain_level = 0
+        max_init_terrain_level = 2
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
-        step_height = [0.035, 0.11]
+        step_height = [0.035, 0.15]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.3
         curriculum_move_up_distance = 6.0
-        curriculum_move_down_expected_factor = 0.25
-        curriculum_move_down_min_distance = 0.8
-        curriculum_success_reward_threshold = 4.0
-        curriculum_success_down_threshold = 1.5
-        curriculum_success_min_distance = 2.4
-        curriculum_success_min_episode_time = 12.0
+        curriculum_move_down_expected_factor = 0.18
+        curriculum_move_down_min_distance = 0.6
+        curriculum_success_reward_threshold = 3.2
+        curriculum_success_down_threshold = 0.8
+        curriculum_success_min_distance = 1.8
+        curriculum_success_min_episode_time = 8.0
         curriculum_allow_distance_promotion = False
-        curriculum_max_terrain_level = 6
+        curriculum_max_terrain_level = 9
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -911,9 +912,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_contact_smooth_frames = 3
         stair_ff_anneal_enabled = True
         stair_ff_anneal_start_iter = 1000
-        stair_ff_anneal_end_iter = 9000
+        stair_ff_anneal_end_iter = 14000
         stair_ff_anneal_final_scale = 0.0
         stair_ff_anneal_steps_per_iter = 32
+        stair_ff_anneal_iter_offset = 0.0
         stair_ff_anneal_override_scale = None
         stair_ff_joint_amplitudes = {
             "FL_thigh_joint": 0.30,
@@ -1002,21 +1004,21 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -14.0
             upward = 0.0
-            ang_vel_xy = -0.20
+            ang_vel_xy = -0.30
             base_height = -7.5
             lin_vel_z = -0.3
 
             # Failure/contact penalties.
             termination = -400.0
             collision = -16.0
-            collision_hard = -125.0
+            collision_hard = -140.0
             collision_head = 0.0
 
             # Remove tiny regularizers that only add noise to the scalar reward.
             torques = 0.0
             powers = 0.0
             dof_acc = 0.0
-            action_rate = -0.02
+            action_rate = -0.03
             action_smoothness = 0.0
             dof_pos_limits = 0.0
             dof_vel_limits = 0.0
@@ -1080,11 +1082,11 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         entropy_coef = 0.001
         residual_l2_coef = 0.05
-        learning_rate = 3.0e-4
-        learning_rate_min = 9.0e-5
-        learning_rate_max = 9.0e-3
+        learning_rate = 5.0e-4
+        learning_rate_min = 1.0e-4
+        learning_rate_max = 3.0e-3
         schedule = "adaptive"
-        desired_kl = 0.01
+        desired_kl = 0.015
         gamma = 0.995
         lam = 0.95
         clip_param = 0.2

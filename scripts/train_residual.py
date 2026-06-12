@@ -43,6 +43,8 @@ def get_residual_args():
         {"name": "--residual_std_min", "type": float, "default": 0.45, "help": "Lower clamp for the final executed action std."},
         {"name": "--residual_std_max", "type": float, "default": 1.10, "help": "Upper clamp for the final executed action std."},
         {"name": "--reset_residual_std", "type": float, "default": None, "help": "If set, overwrite residual std after loading a resume checkpoint."},
+        {"name": "--stair_ff_scale", "type": float, "default": None, "help": "Fix stair feedforward at this scale for the whole run. Omit to use annealing."},
+        {"name": "--stair_ff_anneal_iter_offset", "type": float, "default": None, "help": "Start the stair feedforward anneal schedule at this local iteration."},
     ]
 
     args = gymutil.parse_arguments(description="Train residual expert policy.", custom_parameters=custom_parameters)
@@ -77,6 +79,12 @@ def train(args):
         raise ValueError("Fresh residual training requires --base_ckpt.")
 
     env, _ = task_registry.make_env(name=args.task, args=args)
+    if hasattr(env.cfg, "control"):
+        if args.stair_ff_scale is not None:
+            env.cfg.control.stair_ff_anneal_override_scale = float(args.stair_ff_scale)
+        if args.stair_ff_anneal_iter_offset is not None:
+            env.cfg.control.stair_ff_anneal_iter_offset = float(args.stair_ff_anneal_iter_offset)
+
     _, train_cfg = task_registry.get_cfgs(args.task)
     _, base_train_cfg = task_registry.get_cfgs(args.base_task)
     _, train_cfg = update_cfg_from_args(None, train_cfg, args)
@@ -118,6 +126,8 @@ def train(args):
     print("[train_residual] residual_std_scale =", actor_critic.residual_std_scale)
     print("[train_residual] residual_std_range =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
     print("[train_residual] reset_residual_std =", args.reset_residual_std)
+    print("[train_residual] stair_ff_scale =", getattr(env.cfg.control, "stair_ff_anneal_override_scale", None))
+    print("[train_residual] stair_ff_anneal_iter_offset =", getattr(env.cfg.control, "stair_ff_anneal_iter_offset", 0.0))
     print("[train_residual] log_dir        =", log_dir)
 
     runner = ResidualPolicyRunner(
