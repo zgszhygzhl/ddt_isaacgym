@@ -71,17 +71,19 @@ python scripts/train_residual.py \
 
 
 推理moe
-  python scripts/play_residual.py \
+python scripts/play_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --load_run Jun08_12-59-50_ \
-  --checkpoint 3200 \
+  --load_run Jun12_18-38-56_ \
+  --checkpoint 19600 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
-  --residual_alpha 0.55 \
-  --cmd_x 0.5 \
+  --residual_alpha 0.50 \
+  --residual_delta_clip 0.45 \
+  --stair_ff_scale 0.0 \
+  --cmd_x 0.40 \
   --cmd_y 0.0 \
-  --cmd_yaw 0.0 \
-  --command_mode yaw
+  --cmd_heading 0.0 \
+  --command_mode heading
 
 
 ### Installation ###

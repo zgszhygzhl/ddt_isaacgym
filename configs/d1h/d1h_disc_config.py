@@ -110,6 +110,10 @@ class D1HMoEDisc(D1HMoEBase):
         return gate.float()
 
     def _get_stair_ff_anneal_scale(self):
+        override_scale = getattr(self.cfg.control, "stair_ff_anneal_override_scale", None)
+        if override_scale is not None:
+            return torch.as_tensor(float(override_scale), device=self.device)
+
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
             return torch.ones((), device=self.device)
 
@@ -910,6 +914,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_anneal_end_iter = 9000
         stair_ff_anneal_final_scale = 0.0
         stair_ff_anneal_steps_per_iter = 32
+        stair_ff_anneal_override_scale = None
         stair_ff_joint_amplitudes = {
             "FL_thigh_joint": 0.30,
             "FL_calf_joint": -0.60,

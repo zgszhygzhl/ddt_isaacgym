@@ -84,6 +84,7 @@ def get_residual_play_args():
 
         {"name": "--base_ckpt", "type": str, "default": None, "help": "Optional base checkpoint. Usually unnecessary if loading a full residual wrapper checkpoint."},
         {"name": "--residual_alpha", "type": float, "default": 0.3, "help": "Scale factor for the residual expert mean."},
+        {"name": "--residual_delta_clip", "type": float, "default": 0.45, "help": "Per-action clamp for the alpha-scaled residual mean. Must match training."},
         {"name": "--residual_std_scale", "type": float, "default": None, "help": "Optional scale factor for residual exploration std. Defaults to 1.0 when omitted."},
         {"name": "--residual_std_min", "type": float, "default": 0.02, "help": "Lower clamp for the final executed action std."},
         {"name": "--residual_std_max", "type": float, "default": 0.55, "help": "Upper clamp for the final executed action std."},
@@ -96,6 +97,7 @@ def get_residual_play_args():
         {"name": "--cmd_yaw", "type": float, "default": None, "help": "Fixed target yaw rate during inference. Used when --command_mode yaw. If any command override is used and this is not set, it defaults to 0.0."},
         {"name": "--cmd_heading", "type": float, "default": None, "help": "Fixed target heading during inference. Used when --command_mode heading. If not set, defaults to 0.0."},
         {"name": "--command_mode", "type": str, "default": "yaw", "help": "Command mode for play override: yaw or heading."},
+        {"name": "--stair_ff_scale", "type": float, "default": None, "help": "Stair feedforward scale for play. Defaults to the configured anneal final scale."},
         {"name": "--cmd_resampling_time", "type": float, "default": 1e9, "help": "Command resampling time during inference when command override is used."},
 
         {"name": "--enable_noise", "action": "store_true", "default": False, "help": "Enable observation noise during inference."},
@@ -330,6 +332,12 @@ def prepare_env_cfg(env_cfg, args):
         ]:
             if hasattr(env_cfg.domain_rand, attr_name):
                 setattr(env_cfg.domain_rand, attr_name, False)
+
+    if hasattr(env_cfg, "control") and hasattr(env_cfg.control, "stair_ff_anneal_final_scale"):
+        stair_ff_scale = args.stair_ff_scale
+        if stair_ff_scale is None:
+            stair_ff_scale = env_cfg.control.stair_ff_anneal_final_scale
+        env_cfg.control.stair_ff_anneal_override_scale = float(stair_ff_scale)
 
     env_cfg = apply_fixed_command_cfg(env_cfg, args)
 
@@ -595,6 +603,7 @@ def play(args):
         residual_std_scale=args.residual_std_scale,
         min_policy_std=args.residual_std_min,
         max_policy_std=args.residual_std_max,
+        residual_delta_clip=args.residual_delta_clip,
     )
 
     resume_path = resolve_resume_path(train_cfg, args)
@@ -615,6 +624,9 @@ def play(args):
     print("[play_residual] checkpoint          =", resume_path)
     print("[play_residual] base_ckpt           =", args.base_ckpt)
     print("[play_residual] residual_alpha      =", args.residual_alpha)
+    print("[play_residual] residual_delta_clip =", args.residual_delta_clip)
+    if hasattr(env.cfg.control, "stair_ff_anneal_override_scale"):
+        print("[play_residual] stair_ff_scale       =", env.cfg.control.stair_ff_anneal_override_scale)
     print("[play_residual] residual_std_scale  =", actor_critic.residual_std_scale)
     print("[play_residual] residual_std_range  =", (actor_critic.min_policy_std, actor_critic.max_policy_std))
     print("[play_residual] num_envs            =", env_cfg.env.num_envs)
