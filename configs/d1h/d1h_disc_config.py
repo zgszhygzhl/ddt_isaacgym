@@ -865,7 +865,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         max_init_terrain_level = 2
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
-        step_height = [0.035, 0.15]
+        step_height = [0.17, 0.17]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.3
@@ -918,10 +918,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_anneal_iter_offset = 0.0
         stair_ff_anneal_override_scale = None
         stair_ff_joint_amplitudes = {
-            "FL_thigh_joint": 0.30,
-            "FL_calf_joint": -0.60,
-            "FR_thigh_joint": 0.30,
-            "FR_calf_joint": -0.60,
+            "FL_thigh_joint": 0.43,
+            "FL_calf_joint": -0.86,
+            "FR_thigh_joint": 0.43,
+            "FR_calf_joint": -0.86,
         }
 
     class rewards(D1HMoEBaseCfg.rewards):

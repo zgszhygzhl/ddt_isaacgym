@@ -73,8 +73,8 @@ python scripts/train_residual.py \
 python scripts/play_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --load_run Jun12_18-38-56_ \
-  --checkpoint 19600 \
+  --load_run Jun12_11-25-56_ \
+  --checkpoint 9000 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --residual_alpha 0.50 \
   --residual_delta_clip 0.45 \
