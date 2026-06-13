@@ -23,10 +23,11 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
 
         # Moving-window stair curriculum state.
-        # Bucket 0 is intentionally close to the Jun12_11-25-56_ / 9000-iter state:
-        #   terrain window: Level 1 / 2 / 3
-        #   ff scale: 1.0
-        #   command vx: fixed by cfg.commands.ranges.lin_vel_x
+        # Bucket b samples three adjacent terrain levels:
+        #   low = first_low + b, main = low + 1, challenge = low + 2.
+        # Bucket 0 is deliberately easy (Level 0/1/2) so that resume training
+        # starts like the successful Jun12_18-38-56_ run, but subsequent buckets
+        # continue toward high stairs.
         self.stair_bucket_id = int(getattr(self.cfg.terrain, "stair_bucket_initial_id", 0))
         self.stair_bucket_last_update_iter = 0
         self.stair_bucket_good_windows = 0
@@ -274,11 +275,10 @@ class D1HMoEDisc(D1HMoEBase):
             debug_episode["stair_ff_active_ratio"] = torch.mean(self.stair_ff_active_sum[env_ids] / denom)
             debug_episode["stair_ff_anneal_scale"] = self._get_stair_ff_anneal_scale()
 
-        super().reset_idx(env_ids)
-
         if getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
             debug_episode.update(self._get_stair_bucket_debug_episode())
 
+        super().reset_idx(env_ids)
         if len(debug_episode) > 0 and "episode" in self.extras:
             self.extras["episode"].update(debug_episode)
 
@@ -343,7 +343,7 @@ class D1HMoEDisc(D1HMoEBase):
             min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
             cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
             speed_fraction = getattr(self.cfg.control, "stair_ff_blocking_speed_fraction", 0.65)
-            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.30)
+            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.22)
             blocking_speed = torch.minimum(cmd_x * speed_fraction, torch.full_like(cmd_x, speed_max))
             arm = arm & (self.base_lin_vel[:, 0] < blocking_speed)
 
@@ -357,17 +357,12 @@ class D1HMoEDisc(D1HMoEBase):
         return gate.float()
 
     def _get_stair_ff_anneal_scale(self):
-        override_scale = getattr(self.cfg.control, "stair_ff_anneal_override_scale", None)
-        if override_scale is not None:
-            return torch.as_tensor(float(override_scale), device=self.device)
-
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
             return torch.ones((), device=self.device)
 
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
-        iter_offset = float(getattr(self.cfg.control, "stair_ff_anneal_iter_offset", 0.0))
         train_iter = torch.as_tensor(
-            float(getattr(self, "common_step_counter", 0)) / steps_per_iter + iter_offset,
+            float(getattr(self, "common_step_counter", 0)) / steps_per_iter,
             device=self.device,
         )
         start_iter = float(getattr(self.cfg.control, "stair_ff_anneal_start_iter", 0.0))
@@ -1126,9 +1121,8 @@ class D1HMoEDisc(D1HMoEBase):
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
-        # Stage-A objective: climb higher stairs at an almost fixed forward speed.
-        # Speed curriculum and feedforward annealing are intentionally postponed
-        # until the moving-window terrain bucket reaches the target height.
+        # Stage A: keep speed near the previously successful 0.4 m/s band.
+        # Terrain difficulty is handled by the moving-window stair bucket.
         curriculum = False
         max_curriculum_x = 0.55
         max_curriculum_x_back = 0.0
@@ -1140,81 +1134,83 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         startup_freeze_time = 0.0
 
         class ranges:
-            # Verified stable command band around 0.4 m/s.
-            lin_vel_x = [0.36, 0.46]
+            # Values below 0.2 are zeroed by the base command sampler.
+            lin_vel_x = [0.32, 0.44]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [0.0, 0.0]
             heading = [0.0, 0.0]
 
     class terrain(D1HMoEBaseCfg.terrain):
+        # Stage 1: only clean up-stairs, starting at the easiest row.
         curriculum = True
-        max_init_terrain_level = 3
-
+        max_init_terrain_level = 0
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
 
-        # Use more rows so the low-level heights stay close to the previous
-        # [0.035, 0.15] / 10-row run, while the final row reaches about 17 cm.
-        # In utils/terrain.py: difficulty = row / num_rows, so row 12 height is:
-        # 0.035 + (0.18125 - 0.035) * 12 / 13 = 0.170 m.
-        num_rows = 13
-        step_height = [0.035, 0.18125]
-
+        # Moving-window bucket curriculum requires enough rows to keep the early
+        # rows easy while extending the later rows toward ~17.5 cm.
+        # In utils/terrain.py, up-stair height uses:
+        #   height(row i) = min + (max - min) * i / num_rows
+        # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
+        # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
+        # instead of suddenly jumping to a fixed 17 cm stair.
+        num_rows = 15
+        step_height = [0.035, 0.185]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.3
-
-        # Original per-env stair curriculum thresholds are reused as pass/fail
-        # definitions for bucket promotion/demotion.
         curriculum_move_up_distance = 6.0
-        curriculum_move_down_expected_factor = 0.18
-        curriculum_move_down_min_distance = 0.6
-        curriculum_success_reward_threshold = 3.2
-        curriculum_success_down_threshold = 0.8
-        curriculum_success_min_distance = 1.8
-        curriculum_success_min_episode_time = 8.0
+        curriculum_move_down_expected_factor = 0.25
+        curriculum_move_down_min_distance = 0.8
+        curriculum_success_reward_threshold = 4.0
+        curriculum_success_down_threshold = 1.5
+        curriculum_success_min_distance = 2.4
+        curriculum_success_min_episode_time = 12.0
         curriculum_allow_distance_promotion = False
-        curriculum_max_terrain_level = 12
+        curriculum_max_terrain_level = 14
 
         # Moving-window bucket curriculum.
-        # Bucket b samples: [first_low+b, first_low+b+1, first_low+b+2].
-        # Default bucket 0 samples Level 1 / 2 / 3, close to the 9000-iter
-        # terrain_level state, without the 17cm OOD jump.
+        # Bucket b samples [low, main, challenge] = [b, b+1, b+2].
+        # Bucket 0 therefore samples Level 0 / 1 / 2 with 25% / 60% / 15%,
+        # matching the stable low-difficulty startup behavior of Jun12_18-38-56_,
+        # while later buckets keep moving toward ~17 cm stairs.
         stair_bucket_curriculum = True
         stair_bucket_initial_id = 0
-        stair_bucket_first_low_level = 1
-        stair_bucket_max_id = 9
+        stair_bucket_first_low_level = 0
+        stair_bucket_max_id = 12
         stair_bucket_sample_probs = [0.25, 0.60, 0.15]
 
-        # Bucket ff scale. Base amplitude remains 0.30 / -0.60; these values
-        # only multiply that base amplitude smoothly as the terrain window moves.
+        # Base feedforward remains 0.30/-0.60. These scales multiply it smoothly
+        # as the bucket moves upward; no sudden 0.43/-0.86 jump.
         stair_bucket_ff_scales = [
-            1.00,  # bucket 0: L1/L2/L3
-            1.04,  # bucket 1: L2/L3/L4
-            1.08,  # bucket 2: L3/L4/L5
-            1.12,  # bucket 3: L4/L5/L6
-            1.17,  # bucket 4: L5/L6/L7
-            1.22,  # bucket 5: L6/L7/L8
-            1.28,  # bucket 6: L7/L8/L9
-            1.34,  # bucket 7: L8/L9/L10
-            1.38,  # bucket 8: L9/L10/L11
-            1.40,  # bucket 9: L10/L11/L12, challenge reaches ~17cm
+            1.00,  # bucket 0: L0/L1/L2
+            1.00,  # bucket 1: L1/L2/L3
+            1.03,  # bucket 2: L2/L3/L4
+            1.06,  # bucket 3: L3/L4/L5
+            1.09,  # bucket 4: L4/L5/L6
+            1.12,  # bucket 5: L5/L6/L7
+            1.16,  # bucket 6: L6/L7/L8
+            1.20,  # bucket 7: L7/L8/L9
+            1.24,  # bucket 8: L8/L9/L10
+            1.28,  # bucket 9: L9/L10/L11
+            1.32,  # bucket 10: L10/L11/L12
+            1.36,  # bucket 11: L11/L12/L13
+            1.40,  # bucket 12: L12/L13/L14, challenge ~17.5 cm
         ]
 
-        # Promotion: main level should already be reliable, and challenge level
-        # should have begun to succeed. This avoids upgrading because the replay
-        # slice is easy.
+        # Promotion: main level must be stable, challenge level must have begun
+        # to succeed, and the overall collapse rate must stay low.
         stair_bucket_update_interval = 300
         stair_bucket_cooldown_iters = 300
         stair_bucket_min_main_samples = 96
         stair_bucket_min_challenge_samples = 32
         stair_bucket_promote_main_rate = 0.65
-        stair_bucket_promote_challenge_rate = 0.35
+        stair_bucket_promote_challenge_rate = 0.30
         stair_bucket_promote_max_collapse_rate = 0.25
         stair_bucket_promote_windows = 2
 
-        # Demotion is conservative. A bucket should fall back only when the new
-        # window breaks the main/easy levels, not merely because challenge samples fail.
+        # Demotion is conservative; fall back only when the current/easy levels
+        # are broken, not merely because challenge samples fail.
         stair_bucket_demote_main_rate = 0.35
         stair_bucket_demote_low_rate = 0.50
         stair_bucket_demote_collapse_rate = 0.45
@@ -1248,22 +1244,17 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_min_forward_travel = 0.15
         stair_ff_require_blocking = True
         stair_ff_blocking_speed_fraction = 0.65
-        stair_ff_blocking_speed_max = 0.30
+        stair_ff_blocking_speed_max = 0.22
         stair_ff_followup_delay_factor = 0.35
         stair_ff_contact_smooth_frames = 3
-
-        # Stage A: do NOT anneal the feedforward yet.
-        # It will be annealed only after the terrain bucket reaches the target height.
+        # Stage A: keep feedforward available while terrain buckets move upward.
+        # Speed curriculum and feedforward annealing come in the next stage after
+        # the high-stair bucket is reached.
         stair_ff_anneal_enabled = False
         stair_ff_anneal_start_iter = 1000
-        stair_ff_anneal_end_iter = 14000
+        stair_ff_anneal_end_iter = 9000
         stair_ff_anneal_final_scale = 1.0
         stair_ff_anneal_steps_per_iter = 32
-        stair_ff_anneal_iter_offset = 0.0
-        stair_ff_anneal_override_scale = None
-
-        # Keep the 9000-iter base amplitude. The bucket curriculum multiplies this
-        # by stair_bucket_ff_scales, avoiding a sudden 0.43/-0.86 OOD action jump.
         stair_ff_joint_amplitudes = {
             "FL_thigh_joint": 0.30,
             "FL_calf_joint": -0.60,
@@ -1351,21 +1342,21 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -14.0
             upward = 0.0
-            ang_vel_xy = -0.30
+            ang_vel_xy = -0.20
             base_height = -7.5
             lin_vel_z = -0.3
 
             # Failure/contact penalties.
             termination = -400.0
             collision = -16.0
-            collision_hard = -140.0
+            collision_hard = -125.0
             collision_head = 0.0
 
             # Remove tiny regularizers that only add noise to the scalar reward.
             torques = 0.0
             powers = 0.0
             dof_acc = 0.0
-            action_rate = -0.03
+            action_rate = -0.02
             action_smoothness = 0.0
             dof_pos_limits = 0.0
             dof_vel_limits = 0.0
@@ -1429,11 +1420,11 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
     class algorithm(D1HMoEBaseCfgPPO.algorithm):
         entropy_coef = 0.001
         residual_l2_coef = 0.05
-        learning_rate = 5.0e-4
-        learning_rate_min = 1.0e-4
-        learning_rate_max = 3.0e-3
+        learning_rate = 3.0e-4
+        learning_rate_min = 9.0e-5
+        learning_rate_max = 9.0e-3
         schedule = "adaptive"
-        desired_kl = 0.015
+        desired_kl = 0.01
         gamma = 0.995
         lam = 0.95
         clip_param = 0.2
