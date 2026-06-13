@@ -53,6 +53,10 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_main_pass_total = 0
         self.stair_bucket_challenge_pass_total = 0
         self.stair_bucket_collapse_total = 0
+        self.stair_bucket_challenge_step_success_sum = 0.0
+        self.stair_bucket_challenge_x_progress_sum = 0.0
+        self.stair_bucket_challenge_episode_time_sum = 0.0
+        self.stair_bucket_challenge_terminated_total = 0
 
     def _get_terrain_max_level(self):
         if hasattr(self, "terrain_origins"):
@@ -153,6 +157,26 @@ class D1HMoEDisc(D1HMoEBase):
             "stair_bucket_main_count": torch.as_tensor(float(getattr(self, "stair_bucket_main_count", 0)), device=self.device),
             "stair_bucket_challenge_count": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_count", 0)), device=self.device),
             "stair_bucket_total_count": torch.as_tensor(float(getattr(self, "stair_bucket_total_count", 0)), device=self.device),
+            "stair_bucket_challenge_step_success_mean": torch.as_tensor(
+                float(getattr(self, "stair_bucket_challenge_step_success_sum", 0.0))
+                / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
+                device=self.device,
+            ),
+            "stair_bucket_challenge_x_progress_mean": torch.as_tensor(
+                float(getattr(self, "stair_bucket_challenge_x_progress_sum", 0.0))
+                / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
+                device=self.device,
+            ),
+            "stair_bucket_challenge_episode_time_mean": torch.as_tensor(
+                float(getattr(self, "stair_bucket_challenge_episode_time_sum", 0.0))
+                / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
+                device=self.device,
+            ),
+            "stair_bucket_challenge_terminated_rate": torch.as_tensor(
+                float(getattr(self, "stair_bucket_challenge_terminated_total", 0))
+                / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
+                device=self.device,
+            ),
         }
 
     def _reset_stair_bucket_window(self):
@@ -164,6 +188,10 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_main_pass_total = 0
         self.stair_bucket_challenge_pass_total = 0
         self.stair_bucket_collapse_total = 0
+        self.stair_bucket_challenge_step_success_sum = 0.0
+        self.stair_bucket_challenge_x_progress_sum = 0.0
+        self.stair_bucket_challenge_episode_time_sum = 0.0
+        self.stair_bucket_challenge_terminated_total = 0
         self.stair_bucket_low_count = 0
         self.stair_bucket_main_count = 0
         self.stair_bucket_challenge_count = 0
@@ -209,13 +237,30 @@ class D1HMoEDisc(D1HMoEBase):
         success_min_episode_time = float(getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 5.0))
         collapse_min_distance = float(getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 0.4))
 
-        passed = (
+        # Episode-level pass/collapse for bucket decisions.
+        # Do not use a pure "terminated_early == fail" rule here: some episodes can
+        # have already climbed and moved forward before ending. The curriculum should
+        # detect task competence, not merely timeout status.
+        basic_pass = (
             (step_success > success_reward_threshold)
             & (x_progress > success_min_distance)
             & (episode_time > success_min_episode_time)
-            & (~terminated_early)
         )
-        collapsed = (((step_success < success_down_threshold) & (x_progress < collapse_min_distance)) | terminated_early)
+        strong_short_pass = (
+            (step_success > 1.65 * success_reward_threshold)
+            & (x_progress > 0.60 * success_min_distance)
+            & (episode_time > 0.50 * success_min_episode_time)
+        )
+        passed = basic_pass | strong_short_pass
+
+        bad_no_progress = (step_success < success_down_threshold) & (x_progress < collapse_min_distance)
+        bad_early_fall = (
+            terminated_early
+            & (episode_time < 0.70 * success_min_episode_time)
+            & (x_progress < 0.70 * success_min_distance)
+            & (step_success < success_reward_threshold)
+        )
+        collapsed = bad_no_progress | bad_early_fall
 
         low_mask = levels == low_level
         main_mask = levels == main_level
@@ -235,6 +280,11 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_main_pass_total += int((passed & main_mask).sum().item())
         self.stair_bucket_challenge_pass_total += int((passed & challenge_mask).sum().item())
         self.stair_bucket_collapse_total += int((collapsed & bucket_mask).sum().item())
+        if challenge_count > 0:
+            self.stair_bucket_challenge_step_success_sum += float(step_success[challenge_mask].sum().item())
+            self.stair_bucket_challenge_x_progress_sum += float(x_progress[challenge_mask].sum().item())
+            self.stair_bucket_challenge_episode_time_sum += float(episode_time[challenge_mask].sum().item())
+            self.stair_bucket_challenge_terminated_total += int(terminated_early[challenge_mask].sum().item())
 
         # Log accumulated-window statistics. This makes TensorBoard reflect the exact
         # window that is used for promotion/demotion instead of tiny reset batches.
@@ -266,11 +316,23 @@ class D1HMoEDisc(D1HMoEBase):
 
         promote_main_rate, promote_challenge_rate, promote_max_collapse_rate = self._get_stair_bucket_promote_thresholds()
         promote_windows = int(getattr(self.cfg.terrain, "stair_bucket_promote_windows", 1))
-        promote_ok = (
-            self.stair_bucket_main_pass_rate >= promote_main_rate
-            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate
-            and self.stair_bucket_collapse_rate <= promote_max_collapse_rate
+        promote_low_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_low_rate", 0.55))
+        require_challenge_from_id = int(getattr(self.cfg.terrain, "stair_bucket_require_challenge_from_id", 3))
+        warmup_challenge_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate_warmup", 0.02))
+
+        low_ok = (
+            self.stair_bucket_low_total < min_challenge_samples
+            or self.stair_bucket_low_pass_rate >= promote_low_rate
         )
+        main_ok = self.stair_bucket_main_pass_rate >= promote_main_rate
+        if self.stair_bucket_id < require_challenge_from_id:
+            # Early buckets use challenge only as a sanity check. Challenge is an
+            # exposure signal here, not a hard mastery requirement.
+            challenge_ok = self.stair_bucket_challenge_pass_rate >= warmup_challenge_rate
+        else:
+            challenge_ok = self.stair_bucket_challenge_pass_rate >= promote_challenge_rate
+        collapse_ok = self.stair_bucket_collapse_rate <= promote_max_collapse_rate
+        promote_ok = low_ok and main_ok and challenge_ok and collapse_ok
 
         if promote_ok:
             self.stair_bucket_good_windows += 1
@@ -288,6 +350,7 @@ class D1HMoEDisc(D1HMoEBase):
                 f"[stair bucket] promote {old_bucket} -> {self.stair_bucket_id}: "
                 f"levels={self._get_stair_bucket_levels()}, "
                 f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
+                f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
                 f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
                 f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
                 f"collapse={self.stair_bucket_collapse_rate:.3f}, "
@@ -1227,11 +1290,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         slope_treshold = 0.3
         curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.25
-        curriculum_move_down_min_distance = 0.4
-        curriculum_success_reward_threshold = 3.0
-        curriculum_success_down_threshold = 0.6
-        curriculum_success_min_distance = 1.2
-        curriculum_success_min_episode_time = 5.0
+        curriculum_move_down_min_distance = 0.35
+        curriculum_success_reward_threshold = 2.8
+        curriculum_success_down_threshold = 0.5
+        curriculum_success_min_distance = 1.0
+        curriculum_success_min_episode_time = 4.0
         curriculum_allow_distance_promotion = False
         curriculum_max_terrain_level = 14
 
@@ -1270,18 +1333,21 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_cooldown_iters = 50
         stair_bucket_min_main_samples = 128
         stair_bucket_min_challenge_samples = 32
+        stair_bucket_promote_low_rate = 0.55
+        stair_bucket_require_challenge_from_id = 3
+        stair_bucket_promote_challenge_rate_warmup = 0.02
         stair_bucket_promote_main_rate = 0.55
-        stair_bucket_promote_main_rate_early = 0.35
-        stair_bucket_promote_main_rate_mid = 0.45
-        stair_bucket_promote_main_rate_late = 0.55
+        stair_bucket_promote_main_rate_early = 0.34
+        stair_bucket_promote_main_rate_mid = 0.44
+        stair_bucket_promote_main_rate_late = 0.54
         stair_bucket_promote_challenge_rate = 0.20
-        stair_bucket_promote_challenge_rate_early = 0.10
-        stair_bucket_promote_challenge_rate_mid = 0.15
-        stair_bucket_promote_challenge_rate_late = 0.20
-        stair_bucket_promote_max_collapse_rate = 0.35
-        stair_bucket_promote_max_collapse_rate_early = 0.50
-        stair_bucket_promote_max_collapse_rate_mid = 0.40
-        stair_bucket_promote_max_collapse_rate_late = 0.35
+        stair_bucket_promote_challenge_rate_early = 0.08
+        stair_bucket_promote_challenge_rate_mid = 0.12
+        stair_bucket_promote_challenge_rate_late = 0.18
+        stair_bucket_promote_max_collapse_rate = 0.40
+        stair_bucket_promote_max_collapse_rate_early = 0.60
+        stair_bucket_promote_max_collapse_rate_mid = 0.50
+        stair_bucket_promote_max_collapse_rate_late = 0.40
         stair_bucket_promote_windows = 1
 
         # Demotion is conservative; fall back only when the current/easy levels
