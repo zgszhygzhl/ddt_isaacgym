@@ -22,6 +22,249 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
 
+        # Moving-window stair curriculum state.
+        # Bucket 0 is intentionally close to the Jun12_11-25-56_ / 9000-iter state:
+        #   terrain window: Level 1 / 2 / 3
+        #   ff scale: 1.0
+        #   command vx: fixed by cfg.commands.ranges.lin_vel_x
+        self.stair_bucket_id = int(getattr(self.cfg.terrain, "stair_bucket_initial_id", 0))
+        self.stair_bucket_last_update_iter = 0
+        self.stair_bucket_good_windows = 0
+        self.stair_bucket_bad_windows = 0
+        self.stair_bucket_low_pass_rate = 0.0
+        self.stair_bucket_main_pass_rate = 0.0
+        self.stair_bucket_challenge_pass_rate = 0.0
+        self.stair_bucket_collapse_rate = 0.0
+        self.stair_bucket_low_count = 0
+        self.stair_bucket_main_count = 0
+        self.stair_bucket_challenge_count = 0
+
+    def _get_terrain_max_level(self):
+        if hasattr(self, "terrain_origins"):
+            return int(self.terrain_origins.shape[0] - 1)
+        if hasattr(self, "max_terrain_level"):
+            return int(self.max_terrain_level - 1)
+        return int(getattr(self.cfg.terrain, "num_rows", 10) - 1)
+
+    def _get_stair_bucket_max_id(self):
+        first_low = int(getattr(self.cfg.terrain, "stair_bucket_first_low_level", 1))
+        max_level = self._get_terrain_max_level()
+        # A bucket uses [low, main, challenge] = [first_low+b, first_low+b+1, first_low+b+2].
+        # Therefore the largest valid bucket satisfies challenge <= max_level.
+        geometry_max_bucket = max(0, max_level - first_low - 2)
+        cfg_max_bucket = getattr(self.cfg.terrain, "stair_bucket_max_id", geometry_max_bucket)
+        return int(max(0, min(cfg_max_bucket, geometry_max_bucket)))
+
+    def _get_stair_bucket_levels(self, bucket_id=None):
+        if bucket_id is None:
+            bucket_id = int(getattr(self, "stair_bucket_id", getattr(self.cfg.terrain, "stair_bucket_initial_id", 0)))
+
+        bucket_id = int(max(0, min(bucket_id, self._get_stair_bucket_max_id())))
+        first_low = int(getattr(self.cfg.terrain, "stair_bucket_first_low_level", 1))
+        max_level = self._get_terrain_max_level()
+
+        low_level = max(0, min(first_low + bucket_id, max_level))
+        main_level = max(0, min(low_level + 1, max_level))
+        challenge_level = max(0, min(low_level + 2, max_level))
+        return low_level, main_level, challenge_level
+
+    def _get_stair_bucket_ff_scale(self, bucket_id=None):
+        if bucket_id is None:
+            bucket_id = int(getattr(self, "stair_bucket_id", getattr(self.cfg.terrain, "stair_bucket_initial_id", 0)))
+
+        scales = getattr(self.cfg.terrain, "stair_bucket_ff_scales", [1.0])
+        if len(scales) == 0:
+            return 1.0
+        bucket_id = int(max(0, min(bucket_id, len(scales) - 1)))
+        return float(scales[bucket_id])
+
+    def _sample_stair_bucket_levels(self, num_samples):
+        low_level, main_level, challenge_level = self._get_stair_bucket_levels()
+        probs = getattr(self.cfg.terrain, "stair_bucket_sample_probs", [0.25, 0.60, 0.15])
+        p_low = float(probs[0])
+        p_main = float(probs[1])
+        # p_high is implicit; this makes the code robust if the three values do not sum exactly to 1.
+        r = torch.rand(num_samples, device=self.device)
+
+        levels = torch.full((num_samples,), challenge_level, dtype=torch.long, device=self.device)
+        levels = torch.where(r < p_low + p_main, torch.full_like(levels, main_level), levels)
+        levels = torch.where(r < p_low, torch.full_like(levels, low_level), levels)
+        return levels
+
+    def _resample_stair_bucket_env_origins(self, env_ids):
+        if env_ids is None or len(env_ids) == 0:
+            return
+        if not hasattr(self, "terrain_origins") or not hasattr(self, "terrain_types"):
+            return
+
+        new_levels = self._sample_stair_bucket_levels(len(env_ids))
+        self.terrain_levels[env_ids] = new_levels
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
+
+    def _get_env_origins(self):
+        # This override makes the very first episodes follow the same moving-window
+        # bucket distribution used later in reset_idx(), instead of the default
+        # uniform [0, max_init_terrain_level] initialization.
+        super()._get_env_origins()
+
+        if not getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            return
+        if not getattr(self, "custom_origins", False):
+            return
+        if not hasattr(self, "terrain_levels") or not hasattr(self, "env_origins"):
+            return
+
+        self.stair_bucket_id = int(getattr(self.cfg.terrain, "stair_bucket_initial_id", 0))
+        all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self._resample_stair_bucket_env_origins(all_env_ids)
+
+    def _get_stair_bucket_debug_episode(self):
+        if not getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            return {}
+
+        low_level, main_level, challenge_level = self._get_stair_bucket_levels()
+        ff_scale = self._get_stair_bucket_ff_scale()
+        return {
+            "stair_bucket_id": torch.as_tensor(float(getattr(self, "stair_bucket_id", 0)), device=self.device),
+            "stair_bucket_low_level": torch.as_tensor(float(low_level), device=self.device),
+            "stair_bucket_main_level": torch.as_tensor(float(main_level), device=self.device),
+            "stair_bucket_challenge_level": torch.as_tensor(float(challenge_level), device=self.device),
+            "stair_bucket_ff_scale": torch.as_tensor(float(ff_scale), device=self.device),
+            "stair_bucket_low_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_low_pass_rate", 0.0)), device=self.device),
+            "stair_bucket_main_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_main_pass_rate", 0.0)), device=self.device),
+            "stair_bucket_challenge_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_pass_rate", 0.0)), device=self.device),
+            "stair_bucket_collapse_rate": torch.as_tensor(float(getattr(self, "stair_bucket_collapse_rate", 0.0)), device=self.device),
+            "stair_bucket_low_count": torch.as_tensor(float(getattr(self, "stair_bucket_low_count", 0)), device=self.device),
+            "stair_bucket_main_count": torch.as_tensor(float(getattr(self, "stair_bucket_main_count", 0)), device=self.device),
+            "stair_bucket_challenge_count": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_count", 0)), device=self.device),
+        }
+
+    def _rate_or_minus_one(self, values, mask):
+        count = int(mask.sum().item())
+        if count == 0:
+            return -1.0, 0
+        return float(values[mask].float().mean().item()), count
+
+    def _update_stair_bucket_curriculum(self, env_ids, step_success, x_progress, episode_time, terminated_early):
+        if not getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            return
+
+        if env_ids is None or len(env_ids) == 0:
+            return
+
+        low_level, main_level, challenge_level = self._get_stair_bucket_levels()
+        levels = self.terrain_levels[env_ids]
+
+        success_reward_threshold = float(getattr(self.cfg.terrain, "curriculum_success_reward_threshold", 3.2))
+        success_down_threshold = float(getattr(self.cfg.terrain, "curriculum_success_down_threshold", 0.8))
+        success_min_distance = float(getattr(self.cfg.terrain, "curriculum_success_min_distance", 1.8))
+        success_min_episode_time = float(getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 8.0))
+        collapse_min_distance = float(getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 0.6))
+
+        passed = (
+            (step_success > success_reward_threshold)
+            & (x_progress > success_min_distance)
+            & (episode_time > success_min_episode_time)
+            & (~terminated_early)
+        )
+        collapsed = (
+            ((step_success < success_down_threshold) & (x_progress < collapse_min_distance))
+            | terminated_early
+        )
+
+        low_mask = levels == low_level
+        main_mask = levels == main_level
+        challenge_mask = levels == challenge_level
+
+        self.stair_bucket_low_pass_rate, self.stair_bucket_low_count = self._rate_or_minus_one(passed, low_mask)
+        self.stair_bucket_main_pass_rate, self.stair_bucket_main_count = self._rate_or_minus_one(passed, main_mask)
+        self.stair_bucket_challenge_pass_rate, self.stair_bucket_challenge_count = self._rate_or_minus_one(passed, challenge_mask)
+        self.stair_bucket_collapse_rate = float(collapsed.float().mean().item())
+
+        steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
+        current_iter = int(getattr(self, "common_step_counter", 0) // steps_per_iter)
+
+        interval = int(getattr(self.cfg.terrain, "stair_bucket_update_interval", 300))
+        cooldown = int(getattr(self.cfg.terrain, "stair_bucket_cooldown_iters", 300))
+        if current_iter - int(getattr(self, "stair_bucket_last_update_iter", 0)) < max(interval, cooldown):
+            return
+
+        min_main_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_main_samples", 96))
+        min_challenge_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_challenge_samples", 32))
+
+        promote_main_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_main_rate", 0.65))
+        promote_challenge_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate", 0.35))
+        promote_max_collapse_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_max_collapse_rate", 0.25))
+        promote_windows = int(getattr(self.cfg.terrain, "stair_bucket_promote_windows", 2))
+
+        enough_promote_samples = (
+            self.stair_bucket_main_count >= min_main_samples
+            and self.stair_bucket_challenge_count >= min_challenge_samples
+        )
+        promote_ok = (
+            enough_promote_samples
+            and self.stair_bucket_main_pass_rate >= promote_main_rate
+            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate
+            and self.stair_bucket_collapse_rate <= promote_max_collapse_rate
+        )
+
+        if promote_ok:
+            self.stair_bucket_good_windows += 1
+        else:
+            self.stair_bucket_good_windows = 0
+
+        max_bucket = self._get_stair_bucket_max_id()
+        if self.stair_bucket_good_windows >= promote_windows and self.stair_bucket_id < max_bucket:
+            self.stair_bucket_id += 1
+            self.stair_bucket_last_update_iter = current_iter
+            self.stair_bucket_good_windows = 0
+            self.stair_bucket_bad_windows = 0
+            print(
+                f"[stair bucket] promote to {self.stair_bucket_id}: "
+                f"levels={self._get_stair_bucket_levels()}, "
+                f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
+                f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
+                f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
+                f"collapse={self.stair_bucket_collapse_rate:.3f}"
+            )
+            return
+
+        # Bucket demotion is intentionally conservative. Per-env difficulty is already
+        # controlled by the moving-window sampler; global demotion should only happen
+        # when the current bucket breaks the old/easy slice or causes broad collapse.
+        demote_main_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_main_rate", 0.35))
+        demote_low_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_low_rate", 0.50))
+        demote_collapse_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_collapse_rate", 0.45))
+        demote_windows = int(getattr(self.cfg.terrain, "stair_bucket_demote_windows", 3))
+
+        low_is_broken = (self.stair_bucket_low_count >= min_challenge_samples) and (
+            0.0 <= self.stair_bucket_low_pass_rate < demote_low_rate
+        )
+        main_is_broken = (self.stair_bucket_main_count >= min_main_samples) and (
+            0.0 <= self.stair_bucket_main_pass_rate < demote_main_rate
+        )
+        demote_ok = low_is_broken or (main_is_broken and self.stair_bucket_collapse_rate > demote_collapse_rate)
+
+        if demote_ok and self.stair_bucket_id > 0:
+            self.stair_bucket_bad_windows += 1
+        else:
+            self.stair_bucket_bad_windows = 0
+
+        if self.stair_bucket_bad_windows >= demote_windows and self.stair_bucket_id > 0:
+            self.stair_bucket_id -= 1
+            self.stair_bucket_last_update_iter = current_iter
+            self.stair_bucket_good_windows = 0
+            self.stair_bucket_bad_windows = 0
+            print(
+                f"[stair bucket] demote to {self.stair_bucket_id}: "
+                f"levels={self._get_stair_bucket_levels()}, "
+                f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
+                f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
+                f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
+                f"collapse={self.stair_bucket_collapse_rate:.3f}"
+            )
+
+
     def reset_idx(self, env_ids):
         debug_episode = {}
         if len(env_ids) > 0 and hasattr(self, "stair_ff_trigger_arm_sum"):
@@ -32,6 +275,10 @@ class D1HMoEDisc(D1HMoEBase):
             debug_episode["stair_ff_anneal_scale"] = self._get_stair_ff_anneal_scale()
 
         super().reset_idx(env_ids)
+
+        if getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            debug_episode.update(self._get_stair_bucket_debug_episode())
+
         if len(debug_episode) > 0 and "episode" in self.extras:
             self.extras["episode"].update(debug_episode)
 
@@ -247,7 +494,8 @@ class D1HMoEDisc(D1HMoEBase):
         k_ff = getattr(self.cfg.control, "stair_ff_k", 0.35)
         anneal_scale = self._get_stair_ff_anneal_scale()
         ff_gate = self._get_stair_ff_gate().unsqueeze(1)
-        return ff_gate * k_ff * anneal_scale * ff_offset
+        bucket_scale = self._get_stair_bucket_ff_scale() if getattr(self.cfg.terrain, "stair_bucket_curriculum", False) else 1.0
+        return ff_gate * k_ff * anneal_scale * bucket_scale * ff_offset
 
     def _compute_torques(self, actions):
         """Compute torques with stair feedforward injected as joint-target offsets."""
@@ -289,10 +537,48 @@ class D1HMoEDisc(D1HMoEBase):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _update_terrain_curriculum(self, env_ids):
-        """Use a stair-specific curriculum instead of pure full-terrain distance."""
+        """Moving-window stair terrain curriculum.
+
+        Bucket interpretation:
+            current bucket b -> sample three adjacent levels:
+                low        = first_low + b
+                main       = first_low + b + 1
+                challenge  = first_low + b + 2
+
+        Sampling ratio is cfg.terrain.stair_bucket_sample_probs, default [0.25, 0.60, 0.15].
+        The bucket is promoted only when the main level is already stable and the
+        challenge level has started to succeed. This avoids upgrading because of
+        easy replay levels only.
+        """
         if not self.init_done:
             return
 
+        if getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            x_progress = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
+            episode_time = self.episode_length_buf[env_ids].float() * self.dt
+
+            if hasattr(self, "episode_sums") and "step_success" in self.episode_sums:
+                step_success = self.episode_sums["step_success"][env_ids] / self.max_episode_length_s
+            else:
+                step_success = torch.zeros_like(x_progress)
+
+            if hasattr(self, "time_out_buf"):
+                terminated_early = self.reset_buf[env_ids] & (~self.time_out_buf[env_ids])
+            else:
+                terminated_early = self.reset_buf[env_ids].bool()
+
+            self._update_stair_bucket_curriculum(
+                env_ids=env_ids,
+                step_success=step_success,
+                x_progress=x_progress,
+                episode_time=episode_time,
+                terminated_early=terminated_early,
+            )
+
+            self._resample_stair_bucket_env_origins(env_ids)
+            return
+
+        # Fallback: original per-env stair curriculum.
         distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
         move_up_distance = getattr(self.cfg.terrain, "curriculum_move_up_distance", 3.0)
         move_down_expected_factor = getattr(self.cfg.terrain, "curriculum_move_down_expected_factor", 0.30)
@@ -840,8 +1126,9 @@ class D1HMoEDisc(D1HMoEBase):
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
-        # First make the stair skill learnable; broaden this only after
-        # step_success and terrain_level climb reliably.
+        # Stage-A objective: climb higher stairs at an almost fixed forward speed.
+        # Speed curriculum and feedforward annealing are intentionally postponed
+        # until the moving-window terrain bucket reaches the target height.
         curriculum = False
         max_curriculum_x = 0.55
         max_curriculum_x_back = 0.0
@@ -853,22 +1140,32 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         startup_freeze_time = 0.0
 
         class ranges:
-            # Values below 0.2 are zeroed by the base command sampler.
-            lin_vel_x = [0.28, 0.62]
+            # Verified stable command band around 0.4 m/s.
+            lin_vel_x = [0.36, 0.46]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [0.0, 0.0]
             heading = [0.0, 0.0]
 
     class terrain(D1HMoEBaseCfg.terrain):
-        # Stage 1: only clean up-stairs, starting at the easiest row.
         curriculum = True
-        max_init_terrain_level = 2
+        max_init_terrain_level = 3
+
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
-        step_height = [0.17, 0.17]
+
+        # Use more rows so the low-level heights stay close to the previous
+        # [0.035, 0.15] / 10-row run, while the final row reaches about 17 cm.
+        # In utils/terrain.py: difficulty = row / num_rows, so row 12 height is:
+        # 0.035 + (0.18125 - 0.035) * 12 / 13 = 0.170 m.
+        num_rows = 13
+        step_height = [0.035, 0.18125]
+
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.3
+
+        # Original per-env stair curriculum thresholds are reused as pass/fail
+        # definitions for bucket promotion/demotion.
         curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.18
         curriculum_move_down_min_distance = 0.6
@@ -877,7 +1174,51 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_success_min_distance = 1.8
         curriculum_success_min_episode_time = 8.0
         curriculum_allow_distance_promotion = False
-        curriculum_max_terrain_level = 9
+        curriculum_max_terrain_level = 12
+
+        # Moving-window bucket curriculum.
+        # Bucket b samples: [first_low+b, first_low+b+1, first_low+b+2].
+        # Default bucket 0 samples Level 1 / 2 / 3, close to the 9000-iter
+        # terrain_level state, without the 17cm OOD jump.
+        stair_bucket_curriculum = True
+        stair_bucket_initial_id = 0
+        stair_bucket_first_low_level = 1
+        stair_bucket_max_id = 9
+        stair_bucket_sample_probs = [0.25, 0.60, 0.15]
+
+        # Bucket ff scale. Base amplitude remains 0.30 / -0.60; these values
+        # only multiply that base amplitude smoothly as the terrain window moves.
+        stair_bucket_ff_scales = [
+            1.00,  # bucket 0: L1/L2/L3
+            1.04,  # bucket 1: L2/L3/L4
+            1.08,  # bucket 2: L3/L4/L5
+            1.12,  # bucket 3: L4/L5/L6
+            1.17,  # bucket 4: L5/L6/L7
+            1.22,  # bucket 5: L6/L7/L8
+            1.28,  # bucket 6: L7/L8/L9
+            1.34,  # bucket 7: L8/L9/L10
+            1.38,  # bucket 8: L9/L10/L11
+            1.40,  # bucket 9: L10/L11/L12, challenge reaches ~17cm
+        ]
+
+        # Promotion: main level should already be reliable, and challenge level
+        # should have begun to succeed. This avoids upgrading because the replay
+        # slice is easy.
+        stair_bucket_update_interval = 300
+        stair_bucket_cooldown_iters = 300
+        stair_bucket_min_main_samples = 96
+        stair_bucket_min_challenge_samples = 32
+        stair_bucket_promote_main_rate = 0.65
+        stair_bucket_promote_challenge_rate = 0.35
+        stair_bucket_promote_max_collapse_rate = 0.25
+        stair_bucket_promote_windows = 2
+
+        # Demotion is conservative. A bucket should fall back only when the new
+        # window breaks the main/easy levels, not merely because challenge samples fail.
+        stair_bucket_demote_main_rate = 0.35
+        stair_bucket_demote_low_rate = 0.50
+        stair_bucket_demote_collapse_rate = 0.45
+        stair_bucket_demote_windows = 3
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -910,18 +1251,24 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_blocking_speed_max = 0.30
         stair_ff_followup_delay_factor = 0.35
         stair_ff_contact_smooth_frames = 3
-        stair_ff_anneal_enabled = True
+
+        # Stage A: do NOT anneal the feedforward yet.
+        # It will be annealed only after the terrain bucket reaches the target height.
+        stair_ff_anneal_enabled = False
         stair_ff_anneal_start_iter = 1000
         stair_ff_anneal_end_iter = 14000
-        stair_ff_anneal_final_scale = 0.0
+        stair_ff_anneal_final_scale = 1.0
         stair_ff_anneal_steps_per_iter = 32
         stair_ff_anneal_iter_offset = 0.0
         stair_ff_anneal_override_scale = None
+
+        # Keep the 9000-iter base amplitude. The bucket curriculum multiplies this
+        # by stair_bucket_ff_scales, avoiding a sudden 0.43/-0.86 OOD action jump.
         stair_ff_joint_amplitudes = {
-            "FL_thigh_joint": 0.43,
-            "FL_calf_joint": -0.86,
-            "FR_thigh_joint": 0.43,
-            "FR_calf_joint": -0.86,
+            "FL_thigh_joint": 0.30,
+            "FL_calf_joint": -0.60,
+            "FR_thigh_joint": 0.30,
+            "FR_calf_joint": -0.60,
         }
 
     class rewards(D1HMoEBaseCfg.rewards):

@@ -40,16 +40,16 @@ python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --resume \
-  --load_run Jun12_18-38-56_ \
-  --checkpoint 14000 \
+  --load_run Jun12_11-25-56_ \
+  --checkpoint 9000 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 8000 \
+  --max_iterations 10000 \
   --residual_alpha 0.50 \
   --residual_delta_clip 0.45 \
-  --residual_std_min 0.20 \
-  --residual_std_max 0.55 \
+  --residual_std_min 0.25 \
+  --residual_std_max 0.65 \
   --stair_ff_anneal_iter_offset 7500 \
   --reset_residual_std 0.60
 
