@@ -344,7 +344,12 @@ class D1HMoEDisc(D1HMoEBase):
             self.stair_bucket_challenge_step_success_sum += float(step_success[challenge_mask].sum().item())
             self.stair_bucket_challenge_x_progress_sum += float(x_progress[challenge_mask].sum().item())
             self.stair_bucket_challenge_episode_time_sum += float(episode_time[challenge_mask].sum().item())
-            self.stair_bucket_challenge_terminated_total += int(terminated_early[challenge_mask].sum().item())
+            # A challenge episode that already satisfies the pass definition should
+            # not be vetoed again just because it terminated before the time limit.
+            failed_termination = terminated_early & ~passed
+            self.stair_bucket_challenge_terminated_total += int(
+                (failed_termination & challenge_mask).sum().item()
+            )
 
         # Update live statistics for TensorBoard
         self.stair_bucket_low_count = self.stair_bucket_low_total
@@ -626,7 +631,8 @@ class D1HMoEDisc(D1HMoEBase):
             :, :, baseline_end - baseline_frames:baseline_end
         ].mean(dim=2)
 
-        period = max(getattr(self.cfg.control, "stair_ff_period", 0.65), 1e-6)
+        duration = max(getattr(self.cfg.control, "stair_ff_duration", 0.42), 1e-6)
+        followup_delay = max(getattr(self.cfg.control, "stair_ff_followup_delay", 0.55), duration)
         threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
         rise_threshold = getattr(self.cfg.control, "stair_ff_contact_rise_threshold", 16.0)
         rise_ratio = getattr(self.cfg.control, "stair_ff_contact_rise_ratio", 1.6)
@@ -659,7 +665,7 @@ class D1HMoEDisc(D1HMoEBase):
         first_triggered = left_first | right_first
         self.stair_ff_cooldown_until = torch.where(
             first_triggered,
-            episode_time + period + followup_window + cooldown,
+            episode_time + followup_delay + followup_window + cooldown,
             self.stair_ff_cooldown_until,
         )
 
@@ -671,8 +677,8 @@ class D1HMoEDisc(D1HMoEBase):
             & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
             & followup_available
-            & (left_since_right >= period)
-            & (left_since_right <= period + followup_window)
+            & (left_since_right >= followup_delay)
+            & (left_since_right <= followup_delay + followup_window)
             & contact_hit[:, 0]
         )
         right_followup = (
@@ -680,8 +686,8 @@ class D1HMoEDisc(D1HMoEBase):
             & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
             & followup_available
-            & (right_since_left >= period)
-            & (right_since_left <= period + followup_window)
+            & (right_since_left >= followup_delay)
+            & (right_since_left <= followup_delay + followup_window)
             & contact_hit[:, 1]
         )
         self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
@@ -689,13 +695,13 @@ class D1HMoEDisc(D1HMoEBase):
         followup_triggered = left_followup | right_followup
         self.stair_ff_cooldown_until = torch.where(
             followup_triggered,
-            episode_time + period + cooldown,
+            episode_time + duration + cooldown,
             self.stair_ff_cooldown_until,
         )
 
         self.stair_lift_phase = torch.where(
             self.stair_lift_active,
-            self.stair_lift_phase + self.dt / period,
+            self.stair_lift_phase + self.dt / duration,
             self.stair_lift_phase,
         )
         done = self.stair_lift_phase >= 1.0
@@ -707,7 +713,7 @@ class D1HMoEDisc(D1HMoEBase):
         followup_expired = (
             no_active_after_update
             & (first_trigger_time > 0.0)
-            & (episode_time > first_trigger_time + period + followup_window)
+            & (episode_time > first_trigger_time + followup_delay + followup_window)
         )
         sequence_complete = no_active_after_update & self.stair_followup_used.any(dim=1)
         clear_sequence = followup_expired | sequence_complete
@@ -1535,7 +1541,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class control(D1HMoEBaseCfg.control):
         stair_ff_enabled = True
-        stair_ff_period = 0.70
+        stair_ff_duration = 0.42
+        stair_ff_followup_delay = 0.55
         stair_ff_k = 1.0
         stair_ff_contact_threshold = 40.0
         stair_ff_contact_force_axis = "horizontal"
@@ -1554,9 +1561,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Enhanced base amplitudes for fresh training (bucket ff_scale multiplies these)
         stair_ff_joint_amplitudes = {
             "FL_thigh_joint": 0.34,
-            "FL_calf_joint": -0.68,
+            "FL_calf_joint": -0.57,
             "FR_thigh_joint": 0.34,
-            "FR_calf_joint": -0.68,
+            "FR_calf_joint": -0.57,
         }
 
     class rewards(D1HMoEBaseCfg.rewards):
