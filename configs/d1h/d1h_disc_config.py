@@ -115,8 +115,7 @@ class D1HMoEDisc(D1HMoEBase):
                 promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage1_promote_windows", 2)),
                 low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_low_pass", 0.60)),
                 main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_main_pass", 0.40)),
-                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_pass", 0.04)),
-                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_terminated_cap", 0.95)),
+                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_pass", 0.03)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage1_bad_rate_cap", 0.55)),
             )
         elif b <= 4:  # stage 2
@@ -126,7 +125,6 @@ class D1HMoEDisc(D1HMoEBase):
                 low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_low_pass", 0.62)),
                 main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_main_pass", 0.45)),
                 challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_challenge_pass", 0.08)),
-                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage2_challenge_terminated_cap", 0.90)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage2_bad_rate_cap", 0.50)),
             )
         elif b <= 8:  # stage 3
@@ -136,7 +134,6 @@ class D1HMoEDisc(D1HMoEBase):
                 low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_low_pass", 0.65)),
                 main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_main_pass", 0.48)),
                 challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_challenge_pass", 0.12)),
-                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage3_challenge_terminated_cap", 0.86)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage3_bad_rate_cap", 0.45)),
             )
         else:  # stage 4: bucket 9-12
@@ -146,7 +143,6 @@ class D1HMoEDisc(D1HMoEBase):
                 low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_low_pass", 0.68)),
                 main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_main_pass", 0.52)),
                 challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_challenge_pass", 0.16)),
-                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage4_challenge_terminated_cap", 0.82)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage4_bad_rate_cap", 0.40)),
             )
 
@@ -393,7 +389,6 @@ class D1HMoEDisc(D1HMoEBase):
         promote_low_rate = stage_params["low_pass"]
         promote_main_rate = stage_params["main_pass"]
         promote_challenge_rate_pre = stage_params["challenge_pass"]
-        challenge_terminated_cap = stage_params["challenge_terminated_cap"]
         bad_rate_cap = stage_params["bad_rate_cap"]
         # Dwell: current bucket_id must have been active for at least min_dwell_iters before promoting
         bucket_start_iter = int(getattr(self, "stair_bucket_start_iter", 0))
@@ -409,7 +404,6 @@ class D1HMoEDisc(D1HMoEBase):
         challenge_ok_pre = (
             enough_challenge
             and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_pre
-            and self.stair_bucket_challenge_terminated_rate <= challenge_terminated_cap
             and self.stair_bucket_bad_rate <= bad_rate_cap
         )
         low_mastered_rate = float(getattr(self.cfg.terrain, "stair_bucket_low_mastered_rate", 0.90))
@@ -534,7 +528,25 @@ class D1HMoEDisc(D1HMoEBase):
 
     def step(self, actions):
         actions = self._apply_stair_feedforward(actions)
+        clipped_actions = torch.clamp(
+            actions.to(self.device),
+            -float(self.cfg.normalization.clip_actions),
+            float(self.cfg.normalization.clip_actions),
+        )
+        self._stair_blended_history_action = self._get_action_history_actions(clipped_actions)
         return super().step(actions)
+
+    def compute_observations(self):
+        if hasattr(self, "_stair_blended_history_action"):
+            history_action = self._stair_blended_history_action
+            if hasattr(self, "reset_buf"):
+                history_action = torch.where(
+                    self.reset_buf.unsqueeze(1),
+                    torch.zeros_like(history_action),
+                    history_action,
+                )
+            self.action_history_buf[:, -1] = history_action
+        return super().compute_observations()
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
@@ -575,6 +587,19 @@ class D1HMoEDisc(D1HMoEBase):
 
     def _get_stair_ff_gate(self):
         return self.stair_lift_active.any(dim=1).float()
+
+    def _get_action_history_actions(self, actions):
+        """Expose the action actually sent to the joint target, in policy-action units."""
+        ff_offset = self._get_stair_ff_joint_target_offsets()
+        action_scale = torch.full_like(actions, float(self.cfg.control.action_scale))
+        action_scale[:, self.hip_joint_indices] *= self.cfg.control.hip_scale_reduction
+        equivalent_ff = torch.where(
+            torch.abs(action_scale) > 1e-6,
+            ff_offset / action_scale,
+            torch.zeros_like(ff_offset),
+        )
+        clip_actions = float(self.cfg.normalization.clip_actions)
+        return torch.clamp(actions + equivalent_ff, -clip_actions, clip_actions)
 
     def _get_stair_ff_anneal_scale(self):
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
@@ -620,84 +645,54 @@ class D1HMoEDisc(D1HMoEBase):
             [self.stair_contact_hist[:, :, 1:].clone(), contact_forces.unsqueeze(-1)],
             dim=2,
         )
-        smooth_frames = int(getattr(self.cfg.control, "stair_ff_contact_smooth_frames", 2))
-        smooth_frames = max(1, min(smooth_frames, self.stair_contact_hist.shape[2] - 1))
-        smooth_contact = self.stair_contact_hist[:, :, -smooth_frames:].mean(dim=2)
+        stable_frames = int(getattr(self.cfg.control, "stair_ff_contact_stable_frames", 3))
+        stable_frames = max(1, min(stable_frames, self.stair_contact_hist.shape[2]))
+        recent_contact = self.stair_contact_hist[:, :, -stable_frames:]
+        smooth_contact = recent_contact.mean(dim=2)
 
-        baseline_frames = int(getattr(self.cfg.control, "stair_ff_contact_baseline_frames", 4))
-        baseline_end = self.stair_contact_hist.shape[2] - smooth_frames
-        baseline_frames = max(1, min(baseline_frames, baseline_end))
-        baseline_contact = self.stair_contact_hist[
-            :, :, baseline_end - baseline_frames:baseline_end
-        ].mean(dim=2)
-
-        duration = max(getattr(self.cfg.control, "stair_ff_duration", 0.42), 1e-6)
-        followup_delay = max(getattr(self.cfg.control, "stair_ff_followup_delay", 0.55), duration)
+        duration = max(getattr(self.cfg.control, "stair_ff_duration", 0.60), 1e-6)
+        followup_delay = min(
+            max(getattr(self.cfg.control, "stair_ff_followup_delay", 0.30), 0.0),
+            duration,
+        )
         threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
-        rise_threshold = getattr(self.cfg.control, "stair_ff_contact_rise_threshold", 16.0)
-        rise_ratio = getattr(self.cfg.control, "stair_ff_contact_rise_ratio", 1.6)
-        followup_window = getattr(self.cfg.control, "stair_ff_followup_window", 0.45)
-        cooldown = getattr(self.cfg.control, "stair_ff_cooldown_time", 0.25)
         episode_time = self.episode_length_buf.float() * self.dt
 
         trigger_arm = self._get_stair_ff_trigger_arm()
-        contact_delta = smooth_contact - baseline_contact
-        contact_impulse = (
-            (smooth_contact > threshold)
-            & (contact_delta > rise_threshold)
-            & (smooth_contact > rise_ratio * torch.clamp(baseline_contact, min=1.0))
-        )
-        contact_hit = contact_impulse & trigger_arm.unsqueeze(1)
+        stable_contact = (recent_contact > threshold).all(dim=2)
+        contact_hit = stable_contact & (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
         self.stair_ff_trigger_arm_sum += trigger_arm.float()
         self.stair_ff_contact_hit_sum += contact_hit.any(dim=1).float()
 
         both_hit = contact_hit[:, 0] & contact_hit[:, 1]
         left_stronger = smooth_contact[:, 0] >= smooth_contact[:, 1]
         no_active = ~self.stair_lift_active.any(dim=1)
-        sequence_pending = self.last_stair_trigger.any(dim=1)
-        cooldown_ready = episode_time >= self.stair_ff_cooldown_until
-
-        first_ready = no_active & ~sequence_pending & cooldown_ready
+        first_ready = no_active
         left_first = first_ready & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
         right_first = first_ready & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
         self._trigger_stair_lift(left_first, 0, episode_time)
         self._trigger_stair_lift(right_first, 1, episode_time)
-        first_triggered = left_first | right_first
-        self.stair_ff_cooldown_until = torch.where(
-            first_triggered,
-            episode_time + followup_delay + followup_window + cooldown,
-            self.stair_ff_cooldown_until,
-        )
 
         left_since_right = episode_time - self.last_stair_trigger[:, 1]
         right_since_left = episode_time - self.last_stair_trigger[:, 0]
-        followup_available = ~self.stair_followup_used.any(dim=1)
         left_followup = (
-            no_active
+            self.stair_lift_active[:, 1]
             & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
-            & followup_available
+            & ~self.stair_followup_used[:, 0]
             & (left_since_right >= followup_delay)
-            & (left_since_right <= followup_delay + followup_window)
             & contact_hit[:, 0]
         )
         right_followup = (
-            no_active
+            self.stair_lift_active[:, 0]
             & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
-            & followup_available
+            & ~self.stair_followup_used[:, 1]
             & (right_since_left >= followup_delay)
-            & (right_since_left <= followup_delay + followup_window)
             & contact_hit[:, 1]
         )
         self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
         self._trigger_stair_lift(right_followup, 1, episode_time, is_followup=True)
-        followup_triggered = left_followup | right_followup
-        self.stair_ff_cooldown_until = torch.where(
-            followup_triggered,
-            episode_time + duration + cooldown,
-            self.stair_ff_cooldown_until,
-        )
 
         self.stair_lift_phase = torch.where(
             self.stair_lift_active,
@@ -709,16 +704,8 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_lift_phase = torch.where(done, torch.zeros_like(self.stair_lift_phase), self.stair_lift_phase)
 
         no_active_after_update = ~self.stair_lift_active.any(dim=1)
-        first_trigger_time = torch.maximum(self.last_stair_trigger[:, 0], self.last_stair_trigger[:, 1])
-        followup_expired = (
-            no_active_after_update
-            & (first_trigger_time > 0.0)
-            & (episode_time > first_trigger_time + followup_delay + followup_window)
-        )
-        sequence_complete = no_active_after_update & self.stair_followup_used.any(dim=1)
-        clear_sequence = followup_expired | sequence_complete
-        self.last_stair_trigger[clear_sequence] = 0.0
-        self.stair_followup_used[clear_sequence] = False
+        self.last_stair_trigger[no_active_after_update] = 0.0
+        self.stair_followup_used[no_active_after_update] = False
 
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
@@ -1148,6 +1135,39 @@ class D1HMoEDisc(D1HMoEBase):
 
         return reward * active.float() * lifting.float() * self._get_stair_posture_gate()
 
+    def _reward_stair_ff_tracking(self):
+        """Teach the policy to cooperate with the active feedforward joint target."""
+        if not hasattr(self, "last_stair_ff_signal") or not torch.any(self.stair_lift_active):
+            return torch.zeros(self.num_envs, device=self.device)
+
+        joint_amplitudes = getattr(self.cfg.control, "stair_ff_joint_amplitudes", {})
+        ff_scale = float(getattr(self.cfg.control, "stair_ff_k", 1.0))
+        ff_scale *= float(self._get_stair_ff_anneal_scale().item())
+        if getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
+            ff_scale *= self._get_stair_bucket_ff_scale()
+        sq_error = torch.zeros(self.num_envs, device=self.device)
+        active_count = torch.zeros(self.num_envs, device=self.device)
+        for joint_name, amplitude in joint_amplitudes.items():
+            if joint_name not in self.dof_names:
+                continue
+            joint_idx = self.dof_names.index(joint_name)
+            side = 0 if joint_name.startswith("FL_") else 1 if joint_name.startswith("FR_") else None
+            if side is None:
+                continue
+            active = self.stair_lift_active[:, side]
+            target = (
+                self.default_dof_pos[:, joint_idx]
+                + self.last_stair_ff_signal[:, side] * amplitude * ff_scale
+            )
+            sq_error += torch.square(self.dof_pos[:, joint_idx] - target) * active.float()
+            active_count += active.float()
+
+        active_env = active_count > 0.0
+        mean_sq_error = sq_error / torch.clamp(active_count, min=1.0)
+        sigma = max(float(getattr(self.cfg.rewards, "stair_ff_tracking_sigma", 0.12)), 1e-6)
+        reward = torch.exp(-mean_sq_error / (sigma * sigma)) * active_env.float()
+        return reward * self._get_stair_posture_gate()
+
     def _reward_step_lift(self):
         """Reward reaching a useful lift height while the front step is active."""
 
@@ -1453,7 +1473,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_probs_probe      = [0.10, 0.65, 0.25]
         stair_bucket_probs_pre_promote = [0.10, 0.55, 0.35]
 
-        # Feedforward scale monotonically increases with bucket (base amp = 0.34/-0.68)
+        # Feedforward scale monotonically increases with bucket (base amp = 0.34/-0.57).
         stair_bucket_ff_scales = [
             1.00,  # bucket 0: L0/L1/L2   (~3.5/4.5/5.5 cm)
             1.00,  # bucket 1: L1/L2/L3
@@ -1493,8 +1513,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_stage1_promote_windows = 2
         stair_bucket_stage1_low_pass = 0.60
         stair_bucket_stage1_main_pass = 0.40
-        stair_bucket_stage1_challenge_pass = 0.04
-        stair_bucket_stage1_challenge_terminated_cap = 0.95
+        stair_bucket_stage1_challenge_pass = 0.03
         stair_bucket_stage1_bad_rate_cap = 0.55
         # Stage 2: bucket 2-4  (main ~6.5-8.5 cm)  moderate
         stair_bucket_stage2_min_dwell_iters = 300
@@ -1502,7 +1521,6 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_stage2_low_pass = 0.62
         stair_bucket_stage2_main_pass = 0.45
         stair_bucket_stage2_challenge_pass = 0.08
-        stair_bucket_stage2_challenge_terminated_cap = 0.90
         stair_bucket_stage2_bad_rate_cap = 0.50
         # Stage 3: bucket 5-8  (main ~9.5-12.5 cm)  longer dwell, 3 windows
         stair_bucket_stage3_min_dwell_iters = 500
@@ -1510,7 +1528,6 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_stage3_low_pass = 0.65
         stair_bucket_stage3_main_pass = 0.48
         stair_bucket_stage3_challenge_pass = 0.12
-        stair_bucket_stage3_challenge_terminated_cap = 0.86
         stair_bucket_stage3_bad_rate_cap = 0.45
         # Stage 4: bucket 9-12 (main ~13.5-16.5 cm)  most conservative, 4 windows
         stair_bucket_stage4_min_dwell_iters = 700
@@ -1518,7 +1535,6 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_stage4_low_pass = 0.68
         stair_bucket_stage4_main_pass = 0.52
         stair_bucket_stage4_challenge_pass = 0.16
-        stair_bucket_stage4_challenge_terminated_cap = 0.82
         stair_bucket_stage4_bad_rate_cap = 0.40
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
@@ -1541,18 +1557,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class control(D1HMoEBaseCfg.control):
         stair_ff_enabled = True
-        stair_ff_duration = 0.42
-        stair_ff_followup_delay = 0.55
+        stair_ff_duration = 0.60
+        stair_ff_followup_delay = 0.30
         stair_ff_k = 1.0
-        stair_ff_contact_threshold = 40.0
+        stair_ff_contact_threshold = 50.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
-        stair_ff_contact_rise_threshold = 16.0
-        stair_ff_contact_rise_ratio = 1.6
-        stair_ff_contact_baseline_frames = 4
-        stair_ff_followup_window = 0.45
-        stair_ff_cooldown_time = 0.25
-        stair_ff_contact_smooth_frames = 2
+        stair_ff_contact_stable_frames = 3
         # Feedforward annealing disabled; scale is fixed and grows with bucket.
         stair_ff_anneal_enabled = False
         stair_ff_anneal_override_scale = None
@@ -1576,6 +1587,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         base_height_target = 0.45
         base_height_scale = 0.05
         base_height_deadband = 0.01
+        stair_ff_tracking_sigma = 0.12
 
         # Front height scan window used only by the stair rewards.
         step_clearance_front_x_min = 0.20
@@ -1689,6 +1701,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 1.5
+            stair_ff_tracking = 1.0
             step_lift = 3.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
