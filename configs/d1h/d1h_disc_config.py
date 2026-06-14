@@ -14,7 +14,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_lift_phase = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_lift_active = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         self.stair_lift_side = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.stair_contact_hist = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self.stair_contact_hist = torch.zeros(self.num_envs, 2, 6, device=self.device)
         self.last_stair_ff_signal = torch.zeros(self.num_envs, 2, device=self.device)
         self.last_stair_trigger = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_followup_used = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
@@ -383,11 +383,10 @@ class D1HMoEDisc(D1HMoEBase):
         stage_params = self._get_stair_bucket_stage_params()
         entry_iters = int(getattr(self.cfg.terrain, "stair_bucket_entry_iters", 200))
         recovery_iters = int(getattr(self.cfg.terrain, "stair_bucket_recovery_iters", 300))
+        probe_iters = int(getattr(self.cfg.terrain, "stair_bucket_probe_iters", 300))
         promote_windows = stage_params["promote_windows"]
         promote_low_rate = stage_params["low_pass"]
         promote_main_rate = stage_params["main_pass"]
-        # probe bar is 50% of the full challenge threshold; pre_promote requires full
-        promote_challenge_rate_probe = stage_params["challenge_pass"] * 0.5
         promote_challenge_rate_pre = stage_params["challenge_pass"]
         challenge_terminated_cap = stage_params["challenge_terminated_cap"]
         bad_rate_cap = stage_params["bad_rate_cap"]
@@ -402,11 +401,6 @@ class D1HMoEDisc(D1HMoEBase):
 
         low_ok = enough_low and self.stair_bucket_low_pass_rate >= promote_low_rate
         main_ok = enough_main and self.stair_bucket_main_pass_rate >= promote_main_rate
-        challenge_ok_probe = (
-            enough_challenge
-            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_probe
-            and self.stair_bucket_challenge_terminated_rate <= challenge_terminated_cap
-        )
         challenge_ok_pre = (
             enough_challenge
             and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_pre
@@ -446,12 +440,8 @@ class D1HMoEDisc(D1HMoEBase):
         elif phase == "probe":
             if base_unstable:
                 new_phase = "recovery"
-            elif not (low_ok and main_ok):
-                new_phase = "normal"
-            elif challenge_ok_pre:
+            elif phase_elapsed >= probe_iters and low_ok and main_ok and challenge_ok_pre:
                 new_phase = "pre_promote"
-            elif enough_challenge and not challenge_ok_probe:
-                new_phase = "normal"
 
         elif phase == "pre_promote":
             if base_unstable:
@@ -625,24 +615,33 @@ class D1HMoEDisc(D1HMoEBase):
             [self.stair_contact_hist[:, :, 1:].clone(), contact_forces.unsqueeze(-1)],
             dim=2,
         )
-        smooth_frames = int(getattr(self.cfg.control, "stair_ff_contact_smooth_frames", 3))
-        smooth_frames = max(1, min(smooth_frames, self.stair_contact_hist.shape[2]))
+        smooth_frames = int(getattr(self.cfg.control, "stair_ff_contact_smooth_frames", 2))
+        smooth_frames = max(1, min(smooth_frames, self.stair_contact_hist.shape[2] - 1))
         smooth_contact = self.stair_contact_hist[:, :, -smooth_frames:].mean(dim=2)
-        previous_contact = self.stair_contact_hist[:, :, -2]
+
+        baseline_frames = int(getattr(self.cfg.control, "stair_ff_contact_baseline_frames", 4))
+        baseline_end = self.stair_contact_hist.shape[2] - smooth_frames
+        baseline_frames = max(1, min(baseline_frames, baseline_end))
+        baseline_contact = self.stair_contact_hist[
+            :, :, baseline_end - baseline_frames:baseline_end
+        ].mean(dim=2)
 
         period = max(getattr(self.cfg.control, "stair_ff_period", 0.65), 1e-6)
         threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
-        low_threshold = getattr(self.cfg.control, "stair_ff_contact_low_threshold", 20.0)
-        rise_threshold = getattr(self.cfg.control, "stair_ff_contact_rise_threshold", 8.0)
+        rise_threshold = getattr(self.cfg.control, "stair_ff_contact_rise_threshold", 16.0)
+        rise_ratio = getattr(self.cfg.control, "stair_ff_contact_rise_ratio", 1.6)
         followup_window = getattr(self.cfg.control, "stair_ff_followup_window", 0.45)
         cooldown = getattr(self.cfg.control, "stair_ff_cooldown_time", 0.25)
         episode_time = self.episode_length_buf.float() * self.dt
 
         trigger_arm = self._get_stair_ff_trigger_arm()
-        contact_rising = (smooth_contact > low_threshold) & (
-            smooth_contact - previous_contact > rise_threshold
+        contact_delta = smooth_contact - baseline_contact
+        contact_impulse = (
+            (smooth_contact > threshold)
+            & (contact_delta > rise_threshold)
+            & (smooth_contact > rise_ratio * torch.clamp(baseline_contact, min=1.0))
         )
-        contact_hit = ((smooth_contact > threshold) | contact_rising) & trigger_arm.unsqueeze(1)
+        contact_hit = contact_impulse & trigger_arm.unsqueeze(1)
         self.stair_ff_trigger_arm_sum += trigger_arm.float()
         self.stair_ff_contact_hit_sum += contact_hit.any(dim=1).float()
 
@@ -1477,6 +1476,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Phase timing (in training iterations)
         stair_bucket_entry_iters = 200
         stair_bucket_recovery_iters = 300
+        stair_bucket_probe_iters = 300
 
         # Stage-specific promotion parameters.
         # Higher stages get longer dwell and more windows, NOT sharply higher pass rates.
@@ -1540,8 +1540,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_contact_threshold = 40.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
-        stair_ff_contact_low_threshold = 20.0
-        stair_ff_contact_rise_threshold = 8.0
+        stair_ff_contact_rise_threshold = 16.0
+        stair_ff_contact_rise_ratio = 1.6
+        stair_ff_contact_baseline_frames = 4
         stair_ff_followup_window = 0.45
         stair_ff_cooldown_time = 0.25
         stair_ff_contact_smooth_frames = 2
@@ -1636,11 +1637,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             heading = -2.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
-            orientation = -14.0
+            orientation = -18.0
             upward = 0.0
-            ang_vel_xy = -0.20
-            base_height = -7.5
-            lin_vel_z = -0.3
+            ang_vel_xy = -0.25
+            base_height = -10.0
+            lin_vel_z = -0.5
 
             # Failure/contact penalties.
             termination = -400.0
