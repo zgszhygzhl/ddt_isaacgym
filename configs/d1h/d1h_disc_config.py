@@ -113,53 +113,40 @@ class D1HMoEDisc(D1HMoEBase):
             return dict(
                 min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage1_min_dwell_iters", 200)),
                 promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage1_promote_windows", 2)),
-                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_low_pass", 0.60)),
-                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_main_pass", 0.40)),
-                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_pass", 0.03)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_low_pass", 0.85)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_main_pass", 0.60)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage1_bad_rate_cap", 0.55)),
             )
         elif b <= 4:  # stage 2
             return dict(
                 min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage2_min_dwell_iters", 300)),
                 promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage2_promote_windows", 2)),
-                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_low_pass", 0.62)),
-                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_main_pass", 0.45)),
-                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_challenge_pass", 0.08)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_low_pass", 0.82)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_main_pass", 0.58)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage2_bad_rate_cap", 0.50)),
             )
         elif b <= 8:  # stage 3
             return dict(
                 min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage3_min_dwell_iters", 500)),
                 promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage3_promote_windows", 3)),
-                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_low_pass", 0.65)),
-                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_main_pass", 0.48)),
-                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_challenge_pass", 0.12)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_low_pass", 0.80)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_main_pass", 0.55)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage3_bad_rate_cap", 0.45)),
             )
         else:  # stage 4: bucket 9-12
             return dict(
                 min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage4_min_dwell_iters", 700)),
                 promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage4_promote_windows", 4)),
-                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_low_pass", 0.68)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_low_pass", 0.78)),
                 main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_main_pass", 0.52)),
-                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_challenge_pass", 0.16)),
                 bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage4_bad_rate_cap", 0.40)),
             )
 
     def _sample_stair_bucket_levels(self, num_samples):
         low_level, main_level, challenge_level = self._get_stair_bucket_levels()
-        # Use phase-adaptive sampling probabilities
-        phase = getattr(self, "stair_bucket_phase", "normal")
-        if phase == "entry":
-            probs = getattr(self.cfg.terrain, "stair_bucket_probs_entry", [0.65, 0.33, 0.02])
-        elif phase == "recovery":
-            probs = getattr(self.cfg.terrain, "stair_bucket_probs_recovery", [0.50, 0.48, 0.02])
-        elif phase == "probe":
-            probs = getattr(self.cfg.terrain, "stair_bucket_probs_probe", [0.20, 0.55, 0.25])
-        elif phase == "pre_promote":
-            probs = getattr(self.cfg.terrain, "stair_bucket_probs_pre_promote", [0.15, 0.55, 0.30])
-        else:  # "normal"
-            probs = getattr(self.cfg.terrain, "stair_bucket_probs_normal", [0.25, 0.60, 0.15])
+        # Fixed retention/frontier/exposure distribution. The next level is
+        # always present, but its pass rate never vetoes promotion.
+        probs = getattr(self.cfg.terrain, "stair_bucket_sample_probs", [0.15, 0.65, 0.20])
         p_low = float(probs[0])
         p_main = float(probs[1])
         r = torch.rand(num_samples, device=self.device)
@@ -245,6 +232,10 @@ class D1HMoEDisc(D1HMoEBase):
             ),
             "stair_bucket_stage_num": torch.as_tensor(float(_stage_num), device=self.device),
             "stair_bucket_dwell_iters": torch.as_tensor(float(_bucket_dwell), device=self.device),
+            "stair_bucket_promote_good_windows": torch.as_tensor(
+                float(getattr(self, "stair_bucket_promote_good_windows", 0)),
+                device=self.device,
+            ),
         }
 
     def _reset_stair_bucket_window(self):
@@ -360,7 +351,7 @@ class D1HMoEDisc(D1HMoEBase):
             self.stair_bucket_challenge_terminated_total / max(self.stair_bucket_challenge_total, 1)
         )
 
-        # Check if it is time to make a phase/promotion decision
+        # Check if it is time to make a direct frontier-promotion decision.
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
         current_iter = int(getattr(self, "common_step_counter", 0) // steps_per_iter)
         interval = int(getattr(self.cfg.terrain, "stair_bucket_update_interval", 100))
@@ -370,25 +361,12 @@ class D1HMoEDisc(D1HMoEBase):
 
         min_low_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_low_samples", 128))
         min_main_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_main_samples", 256))
-        min_challenge_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_challenge_samples", 64))
-
-        # --- Phase-based monotonic curriculum ---
-        # Phases: entry -> (normal <-> probe <-> pre_promote) and (any -> recovery -> normal)
-        # bucket_id only goes up; demote is NEVER performed.
-        phase = getattr(self, "stair_bucket_phase", "normal")
-        phase_start_iter = int(getattr(self, "stair_bucket_phase_start_iter", 0))
-        phase_elapsed = current_iter - phase_start_iter
-
-        # Stage-specific thresholds: conservatism scales primarily through longer
-        # dwell time and more required windows, NOT through unreachably high pass rates.
+        # Stage-specific conservatism comes from dwell time and consecutive
+        # windows. There is no phase state machine and no challenge-level gate.
         stage_params = self._get_stair_bucket_stage_params()
-        entry_iters = int(getattr(self.cfg.terrain, "stair_bucket_entry_iters", 200))
-        recovery_iters = int(getattr(self.cfg.terrain, "stair_bucket_recovery_iters", 300))
-        probe_iters = int(getattr(self.cfg.terrain, "stair_bucket_probe_iters", 300))
         promote_windows = stage_params["promote_windows"]
         promote_low_rate = stage_params["low_pass"]
         promote_main_rate = stage_params["main_pass"]
-        promote_challenge_rate_pre = stage_params["challenge_pass"]
         bad_rate_cap = stage_params["bad_rate_cap"]
         # Dwell: current bucket_id must have been active for at least min_dwell_iters before promoting
         bucket_start_iter = int(getattr(self, "stair_bucket_start_iter", 0))
@@ -397,99 +375,36 @@ class D1HMoEDisc(D1HMoEBase):
 
         enough_low = self.stair_bucket_low_total >= min_low_samples
         enough_main = self.stair_bucket_main_total >= min_main_samples
-        enough_challenge = self.stair_bucket_challenge_total >= min_challenge_samples
-
         low_ok = enough_low and self.stair_bucket_low_pass_rate >= promote_low_rate
         main_ok = enough_main and self.stair_bucket_main_pass_rate >= promote_main_rate
-        challenge_ok_pre = (
-            enough_challenge
-            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_pre
-            and self.stair_bucket_bad_rate <= bad_rate_cap
-        )
-        low_mastered_rate = float(getattr(self.cfg.terrain, "stair_bucket_low_mastered_rate", 0.90))
-        low_recovery_rate = float(
-            getattr(self.cfg.terrain, "stair_bucket_low_recovery_rate", promote_low_rate * 0.85)
-        )
-        low_mastered = enough_low and self.stair_bucket_low_pass_rate >= low_mastered_rate
-        low_degraded = enough_low and self.stair_bucket_low_pass_rate < low_recovery_rate
-        bad_unstable = (
-            self.stair_bucket_total >= min_main_samples
-            and self.stair_bucket_bad_rate > bad_rate_cap
-        )
-        base_unstable = low_degraded or bad_unstable
-
+        mastery_ok = low_ok and main_ok and self.stair_bucket_bad_rate <= bad_rate_cap
         max_bucket = self._get_stair_bucket_max_id()
-        new_phase = phase
+        self.stair_bucket_phase = "normal"
+        if mastery_ok and dwell_ok:
+            self.stair_bucket_promote_good_windows += 1
+        else:
+            self.stair_bucket_promote_good_windows = 0
 
-        if phase == "entry":
-            entry_ready = phase_elapsed >= entry_iters or (low_mastered and enough_main)
-            if entry_ready:
-                new_phase = "recovery" if base_unstable else "normal"
-
-        elif phase == "recovery":
-            if phase_elapsed >= recovery_iters and low_mastered and enough_main and not bad_unstable:
-                new_phase = "normal"
-
-        elif phase == "normal":
-            if base_unstable:
-                new_phase = "recovery"
-            elif low_ok and main_ok:
-                new_phase = "pre_promote" if challenge_ok_pre else "probe"
-
-        elif phase == "probe":
-            if base_unstable:
-                new_phase = "recovery"
-            elif phase_elapsed >= probe_iters and low_ok and main_ok and challenge_ok_pre:
-                new_phase = "pre_promote"
-
-        elif phase == "pre_promote":
-            if base_unstable:
-                new_phase = "recovery"
-                self.stair_bucket_promote_good_windows = 0
-            elif not (low_ok and main_ok):
-                new_phase = "probe"
-                self.stair_bucket_promote_good_windows = 0
-            elif challenge_ok_pre and dwell_ok:
-                self.stair_bucket_promote_good_windows += 1
-                if self.stair_bucket_promote_good_windows >= promote_windows and self.stair_bucket_id < max_bucket:
-                    old_bucket = self.stair_bucket_id
-                    self.stair_bucket_id += 1
-                    self.stair_bucket_phase = "entry"
-                    self.stair_bucket_phase_start_iter = current_iter
-                    self.stair_bucket_start_iter = current_iter  # reset dwell timer for new bucket
-                    self.stair_bucket_last_update_iter = current_iter
-                    self.stair_bucket_promote_good_windows = 0
-                    print(
-                        f"[stair bucket] PROMOTE {old_bucket} -> {self.stair_bucket_id}: "
-                        f"levels={self._get_stair_bucket_levels()}, "
-                        f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
-                        f"dwell_iters={bucket_dwell}, "
-                        f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
-                        f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
-                        f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
-                        f"challenge_term={self.stair_bucket_challenge_terminated_rate:.3f}, "
-                        f"bad_rate={self.stair_bucket_bad_rate:.3f}, "
-                        f"counts=({self.stair_bucket_low_total},{self.stair_bucket_main_total},{self.stair_bucket_challenge_total})"
-                    )
-                    self._reset_stair_bucket_window()
-                    return
-            else:
-                new_phase = "probe"
-                self.stair_bucket_promote_good_windows = 0
-
-        if new_phase != phase:
+        if self.stair_bucket_promote_good_windows >= promote_windows and self.stair_bucket_id < max_bucket:
+            old_bucket = self.stair_bucket_id
+            self.stair_bucket_id += 1
+            self.stair_bucket_start_iter = current_iter
+            self.stair_bucket_last_update_iter = current_iter
+            self.stair_bucket_promote_good_windows = 0
             print(
-                f"[stair bucket] phase {phase} -> {new_phase} "
-                f"(bucket={self.stair_bucket_id}, iter={current_iter}, dwell={bucket_dwell}, "
+                f"[stair bucket] PROMOTE {old_bucket} -> {self.stair_bucket_id}: "
+                f"levels={self._get_stair_bucket_levels()}, "
+                f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
+                f"dwell_iters={bucket_dwell}, "
+                f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
                 f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
                 f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
                 f"challenge_term={self.stair_bucket_challenge_terminated_rate:.3f}, "
-                f"bad={self.stair_bucket_bad_rate:.3f})"
+                f"bad_rate={self.stair_bucket_bad_rate:.3f}, "
+                f"counts=({self.stair_bucket_low_total},{self.stair_bucket_main_total},{self.stair_bucket_challenge_total})"
             )
-            self.stair_bucket_phase = new_phase
-            self.stair_bucket_phase_start_iter = current_iter
-            if new_phase in ("recovery", "entry"):
-                self.stair_bucket_promote_good_windows = 0
+            self._reset_stair_bucket_window()
+            return
 
         self.stair_bucket_last_update_iter = current_iter
         self._reset_stair_bucket_window()
@@ -784,7 +699,7 @@ class D1HMoEDisc(D1HMoEBase):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _update_terrain_curriculum(self, env_ids):
-        """Moving-window stair terrain curriculum.
+        """Direct monotonic-frontier stair curriculum.
 
         Bucket interpretation:
             current bucket b -> sample three adjacent levels:
@@ -792,10 +707,10 @@ class D1HMoEDisc(D1HMoEBase):
                 main       = first_low + b + 1
                 challenge  = first_low + b + 2
 
-        Sampling ratio is cfg.terrain.stair_bucket_sample_probs, default [0.25, 0.60, 0.15].
-        The bucket is promoted only when the main level is already stable and the
-        challenge level has started to succeed. This avoids upgrading because of
-        easy replay levels only.
+        Sampling ratio is cfg.terrain.stair_bucket_sample_probs, default
+        [0.15, 0.65, 0.20]. Promotion requires stable low/main performance,
+        acceptable bad rate, dwell time, and consecutive good windows. Challenge
+        performance is logged for diagnosis but never blocks the next promotion.
         """
         if not self.init_done:
             return
@@ -1458,36 +1373,32 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Bucket b: low=Level b, main=Level b+1, challenge=Level b+2.
         stair_bucket_curriculum = True
         stair_bucket_monotonic = True
-        stair_bucket_adaptive_probs = True
+        stair_bucket_adaptive_probs = False
         stair_bucket_initial_id = 0
-        stair_bucket_initial_phase = "entry"
+        stair_bucket_initial_phase = "normal"
         stair_bucket_first_low_level = 0
         stair_bucket_max_id = 12
 
-        # Phase-adaptive sampling probabilities [low, main, challenge].
-        # Recovery keeps substantial low-level replay, while normal concentrates
-        # compute on the current main level once the low level is mastered.
-        stair_bucket_probs_entry      = [0.65, 0.33, 0.02]
-        stair_bucket_probs_recovery   = [0.50, 0.48, 0.02]
-        stair_bucket_probs_normal     = [0.15, 0.75, 0.10]
-        stair_bucket_probs_probe      = [0.10, 0.65, 0.25]
-        stair_bucket_probs_pre_promote = [0.10, 0.55, 0.35]
+        # Fixed [retention, frontier, next-level exposure] distribution.
+        stair_bucket_sample_probs = [0.15, 0.65, 0.20]
 
-        # Feedforward scale monotonically increases with bucket (base amp = 0.34/-0.57).
+        # The base feedforward is already strong. Increase it only mildly at the
+        # harder rows and cap it so the residual policy remains responsible for
+        # terrain-specific adaptation instead of folding the body downward.
         stair_bucket_ff_scales = [
             1.00,  # bucket 0: L0/L1/L2   (~3.5/4.5/5.5 cm)
             1.00,  # bucket 1: L1/L2/L3
-            1.04,  # bucket 2: L2/L3/L4
-            1.08,  # bucket 3: L3/L4/L5
-            1.12,  # bucket 4: L4/L5/L6
-            1.17,  # bucket 5: L5/L6/L7
-            1.22,  # bucket 6: L6/L7/L8
-            1.27,  # bucket 7: L7/L8/L9
-            1.32,  # bucket 8: L8/L9/L10
-            1.37,  # bucket 9: L9/L10/L11
-            1.42,  # bucket 10: L10/L11/L12
-            1.47,  # bucket 11: L11/L12/L13
-            1.52,  # bucket 12: L12/L13/L14 (~15.5/16.5/17.5 cm)
+            1.00,  # bucket 2: L2/L3/L4
+            1.02,  # bucket 3: L3/L4/L5
+            1.04,  # bucket 4: L4/L5/L6
+            1.06,  # bucket 5: L5/L6/L7
+            1.08,  # bucket 6: L6/L7/L8
+            1.10,  # bucket 7: L7/L8/L9
+            1.12,  # bucket 8: L8/L9/L10
+            1.14,  # bucket 9: L9/L10/L11
+            1.15,  # bucket 10: L10/L11/L12
+            1.15,  # bucket 11: L11/L12/L13
+            1.15,  # bucket 12: L12/L13/L14 (~15.5/16.5/17.5 cm)
         ]
 
         # Decision window settings
@@ -1495,14 +1406,6 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_cooldown_iters = 100
         stair_bucket_min_low_samples = 128
         stair_bucket_min_main_samples = 256
-        stair_bucket_min_challenge_samples = 64
-        stair_bucket_low_mastered_rate = 0.90
-        stair_bucket_low_recovery_rate = 0.50
-
-        # Phase timing (in training iterations)
-        stair_bucket_entry_iters = 200
-        stair_bucket_recovery_iters = 300
-        stair_bucket_probe_iters = 300
 
         # Stage-specific promotion parameters.
         # Higher stages get longer dwell and more windows, NOT sharply higher pass rates.
@@ -1511,30 +1414,26 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Stage 1: bucket 0-1  (main ~4.5-5.5 cm)  fast startup
         stair_bucket_stage1_min_dwell_iters = 200
         stair_bucket_stage1_promote_windows = 2
-        stair_bucket_stage1_low_pass = 0.60
-        stair_bucket_stage1_main_pass = 0.40
-        stair_bucket_stage1_challenge_pass = 0.03
+        stair_bucket_stage1_low_pass = 0.85
+        stair_bucket_stage1_main_pass = 0.60
         stair_bucket_stage1_bad_rate_cap = 0.55
         # Stage 2: bucket 2-4  (main ~6.5-8.5 cm)  moderate
         stair_bucket_stage2_min_dwell_iters = 300
         stair_bucket_stage2_promote_windows = 2
-        stair_bucket_stage2_low_pass = 0.62
-        stair_bucket_stage2_main_pass = 0.45
-        stair_bucket_stage2_challenge_pass = 0.08
+        stair_bucket_stage2_low_pass = 0.82
+        stair_bucket_stage2_main_pass = 0.58
         stair_bucket_stage2_bad_rate_cap = 0.50
         # Stage 3: bucket 5-8  (main ~9.5-12.5 cm)  longer dwell, 3 windows
         stair_bucket_stage3_min_dwell_iters = 500
         stair_bucket_stage3_promote_windows = 3
-        stair_bucket_stage3_low_pass = 0.65
-        stair_bucket_stage3_main_pass = 0.48
-        stair_bucket_stage3_challenge_pass = 0.12
+        stair_bucket_stage3_low_pass = 0.80
+        stair_bucket_stage3_main_pass = 0.55
         stair_bucket_stage3_bad_rate_cap = 0.45
         # Stage 4: bucket 9-12 (main ~13.5-16.5 cm)  most conservative, 4 windows
         stair_bucket_stage4_min_dwell_iters = 700
         stair_bucket_stage4_promote_windows = 4
-        stair_bucket_stage4_low_pass = 0.68
+        stair_bucket_stage4_low_pass = 0.78
         stair_bucket_stage4_main_pass = 0.52
-        stair_bucket_stage4_challenge_pass = 0.16
         stair_bucket_stage4_bad_rate_cap = 0.40
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
