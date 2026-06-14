@@ -18,6 +18,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_ff_signal = torch.zeros(self.num_envs, 2, device=self.device)
         self.last_stair_trigger = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_followup_used = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+        self.stair_ff_cooldown_until = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_trigger_arm_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
@@ -531,6 +532,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_ff_signal[env_ids] = 0.0
         self.last_stair_trigger[env_ids] = 0.0
         self.stair_followup_used[env_ids] = False
+        self.stair_ff_cooldown_until[env_ids] = 0.0
         self.stair_ff_trigger_arm_sum[env_ids] = 0.0
         self.stair_ff_contact_hit_sum[env_ids] = 0.0
         self.stair_ff_active_sum[env_ids] = 0.0
@@ -565,35 +567,19 @@ class D1HMoEDisc(D1HMoEBase):
         return contact_forces[:, :2]
 
     def _get_stair_ff_trigger_arm(self):
-        if not getattr(self.cfg.control, "stair_ff_require_step_context", True):
-            return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
+        cmd_x = self.commands[:, 0]
+        arm_condition = cmd_x > min_cmd_x
 
-        context = self._get_step_lift_context()
-        if context is None:
-            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
-        arm = context[0]
         min_travel = getattr(self.cfg.control, "stair_ff_min_forward_travel", 0.15)
         if min_travel > 0.0:
             forward_travel = self.root_states[:, 0] - self.env_origins[:, 0]
-            arm = arm & (forward_travel >= min_travel)
+            arm_condition = arm_condition & (forward_travel >= min_travel)
 
-        if getattr(self.cfg.control, "stair_ff_require_blocking", True):
-            min_cmd_x = getattr(self.cfg.rewards, "step_clearance_min_cmd_x", 0.03)
-            cmd_x = torch.clamp(self.commands[:, 0], min=min_cmd_x)
-            speed_fraction = getattr(self.cfg.control, "stair_ff_blocking_speed_fraction", 0.65)
-            speed_max = getattr(self.cfg.control, "stair_ff_blocking_speed_max", 0.22)
-            blocking_speed = torch.minimum(cmd_x * speed_fraction, torch.full_like(cmd_x, speed_max))
-            arm = arm & (self.base_lin_vel[:, 0] < blocking_speed)
-
-        return arm
+        return arm_condition
 
     def _get_stair_ff_gate(self):
-        gate = self.stair_lift_active.any(dim=1)
-        context = self._get_step_lift_context()
-        if context is not None:
-            gate = gate | context[0]
-        return gate.float()
+        return self.stair_lift_active.any(dim=1).float()
 
     def _get_stair_ff_anneal_scale(self):
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
@@ -642,48 +628,71 @@ class D1HMoEDisc(D1HMoEBase):
         smooth_frames = int(getattr(self.cfg.control, "stair_ff_contact_smooth_frames", 3))
         smooth_frames = max(1, min(smooth_frames, self.stair_contact_hist.shape[2]))
         smooth_contact = self.stair_contact_hist[:, :, -smooth_frames:].mean(dim=2)
+        previous_contact = self.stair_contact_hist[:, :, -2]
 
         period = max(getattr(self.cfg.control, "stair_ff_period", 0.65), 1e-6)
         threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
-        delay = getattr(self.cfg.control, "stair_ff_followup_delay_factor", 0.5) * period
+        low_threshold = getattr(self.cfg.control, "stair_ff_contact_low_threshold", 20.0)
+        rise_threshold = getattr(self.cfg.control, "stair_ff_contact_rise_threshold", 8.0)
+        followup_window = getattr(self.cfg.control, "stair_ff_followup_window", 0.45)
+        cooldown = getattr(self.cfg.control, "stair_ff_cooldown_time", 0.25)
         episode_time = self.episode_length_buf.float() * self.dt
 
         trigger_arm = self._get_stair_ff_trigger_arm()
-        contact_hit = (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
+        contact_rising = (smooth_contact > low_threshold) & (
+            smooth_contact - previous_contact > rise_threshold
+        )
+        contact_hit = ((smooth_contact > threshold) | contact_rising) & trigger_arm.unsqueeze(1)
         self.stair_ff_trigger_arm_sum += trigger_arm.float()
         self.stair_ff_contact_hit_sum += contact_hit.any(dim=1).float()
-        no_lift = ~self.stair_lift_active.any(dim=1)
-        no_contact = ~contact_hit.any(dim=1)
-        clear_mask = no_lift & (no_contact | ~trigger_arm)
-        self.last_stair_trigger[clear_mask] = 0.0
-        self.stair_followup_used[clear_mask] = False
 
         both_hit = contact_hit[:, 0] & contact_hit[:, 1]
         left_stronger = smooth_contact[:, 0] >= smooth_contact[:, 1]
         no_active = ~self.stair_lift_active.any(dim=1)
+        sequence_pending = self.last_stair_trigger.any(dim=1)
+        cooldown_ready = episode_time >= self.stair_ff_cooldown_until
 
-        left_first = no_active & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
-        right_first = no_active & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
+        first_ready = no_active & ~sequence_pending & cooldown_ready
+        left_first = first_ready & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
+        right_first = first_ready & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
         self._trigger_stair_lift(left_first, 0, episode_time)
         self._trigger_stair_lift(right_first, 1, episode_time)
+        first_triggered = left_first | right_first
+        self.stair_ff_cooldown_until = torch.where(
+            first_triggered,
+            episode_time + period + followup_window + cooldown,
+            self.stair_ff_cooldown_until,
+        )
 
         left_since_right = episode_time - self.last_stair_trigger[:, 1]
         right_since_left = episode_time - self.last_stair_trigger[:, 0]
         followup_available = ~self.stair_followup_used.any(dim=1)
         left_followup = (
-            ~self.stair_lift_active[:, 0]
+            no_active
+            & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
             & followup_available
-            & (((left_since_right >= 0.0) & contact_hit[:, 0]) | (left_since_right >= delay))
+            & (left_since_right >= period)
+            & (left_since_right <= period + followup_window)
+            & contact_hit[:, 0]
         )
         right_followup = (
-            ~self.stair_lift_active[:, 1]
+            no_active
+            & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
             & followup_available
-            & (((right_since_left >= 0.0) & contact_hit[:, 1]) | (right_since_left >= delay))
+            & (right_since_left >= period)
+            & (right_since_left <= period + followup_window)
+            & contact_hit[:, 1]
         )
         self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
         self._trigger_stair_lift(right_followup, 1, episode_time, is_followup=True)
+        followup_triggered = left_followup | right_followup
+        self.stair_ff_cooldown_until = torch.where(
+            followup_triggered,
+            episode_time + period + cooldown,
+            self.stair_ff_cooldown_until,
+        )
 
         self.stair_lift_phase = torch.where(
             self.stair_lift_active,
@@ -693,6 +702,18 @@ class D1HMoEDisc(D1HMoEBase):
         done = self.stair_lift_phase >= 1.0
         self.stair_lift_active = self.stair_lift_active & ~done
         self.stair_lift_phase = torch.where(done, torch.zeros_like(self.stair_lift_phase), self.stair_lift_phase)
+
+        no_active_after_update = ~self.stair_lift_active.any(dim=1)
+        first_trigger_time = torch.maximum(self.last_stair_trigger[:, 0], self.last_stair_trigger[:, 1])
+        followup_expired = (
+            no_active_after_update
+            & (first_trigger_time > 0.0)
+            & (episode_time > first_trigger_time + period + followup_window)
+        )
+        sequence_complete = no_active_after_update & self.stair_followup_used.any(dim=1)
+        clear_sequence = followup_expired | sequence_complete
+        self.last_stair_trigger[clear_sequence] = 0.0
+        self.stair_followup_used[clear_sequence] = False
 
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
@@ -1518,12 +1539,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_k = 1.0
         stair_ff_contact_threshold = 40.0
         stair_ff_contact_force_axis = "horizontal"
-        stair_ff_require_step_context = True
         stair_ff_min_forward_travel = 0.12
-        stair_ff_require_blocking = True
-        stair_ff_blocking_speed_fraction = 0.65
-        stair_ff_blocking_speed_max = 0.24
-        stair_ff_followup_delay_factor = 0.35
+        stair_ff_contact_low_threshold = 20.0
+        stair_ff_contact_rise_threshold = 8.0
+        stair_ff_followup_window = 0.45
+        stair_ff_cooldown_time = 0.25
         stair_ff_contact_smooth_frames = 2
         # Feedforward annealing disabled; scale is fixed and grows with bucket.
         stair_ff_anneal_enabled = False
