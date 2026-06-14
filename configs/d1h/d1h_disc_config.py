@@ -22,29 +22,27 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
 
-        # Moving-window stair curriculum state.
-        # Bucket b samples three adjacent terrain levels:
-        #   low = first_low + b, main = low + 1, challenge = low + 2.
-        # Bucket 0 is deliberately easy (Level 0/1/2) so that resume training
-        # starts like the successful Jun12_18-38-56_ run, but subsequent buckets
-        # continue toward high stairs.
+        # Moving-window stair curriculum state (monotonic: bucket_id only increases).
+        # Bucket b samples: low = b, main = b+1, challenge = b+2.
         self.stair_bucket_id = int(getattr(self.cfg.terrain, "stair_bucket_initial_id", 0))
         self.stair_bucket_last_update_iter = 0
-        self.stair_bucket_good_windows = 0
-        self.stair_bucket_bad_windows = 0
+        # Phase-based curriculum: "entry", "recovery", "normal", "probe", "pre_promote"
+        # bucket_id can only increase; demotion is disabled.
+        self.stair_bucket_phase = str(getattr(self.cfg.terrain, "stair_bucket_initial_phase", "entry"))
+        self.stair_bucket_phase_start_iter = 0
+        self.stair_bucket_promote_good_windows = 0
+        self.stair_bucket_start_iter = 0  # training iter when current bucket_id was entered
         self.stair_bucket_low_pass_rate = 0.0
         self.stair_bucket_main_pass_rate = 0.0
         self.stair_bucket_challenge_pass_rate = 0.0
-        self.stair_bucket_collapse_rate = 0.0
+        self.stair_bucket_bad_rate = 0.0
+        self.stair_bucket_challenge_terminated_rate = 0.0
         self.stair_bucket_low_count = 0
         self.stair_bucket_main_count = 0
         self.stair_bucket_challenge_count = 0
         self.stair_bucket_total_count = 0
 
-        # Accumulated window statistics. The previous per-reset batch statistics
-        # were too small for fast bucket promotion, because reset_idx() often sees
-        # only a few finished environments at a time. Promotion/demotion must be
-        # decided from an accumulated window.
+        # Accumulated window statistics
         self.stair_bucket_low_total = 0
         self.stair_bucket_main_total = 0
         self.stair_bucket_challenge_total = 0
@@ -52,7 +50,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_low_pass_total = 0
         self.stair_bucket_main_pass_total = 0
         self.stair_bucket_challenge_pass_total = 0
-        self.stair_bucket_collapse_total = 0
+        self.stair_bucket_bad_total = 0
         self.stair_bucket_challenge_step_success_sum = 0.0
         self.stair_bucket_challenge_x_progress_sum = 0.0
         self.stair_bucket_challenge_episode_time_sum = 0.0
@@ -97,14 +95,75 @@ class D1HMoEDisc(D1HMoEBase):
         bucket_id = int(max(0, min(bucket_id, len(scales) - 1)))
         return float(scales[bucket_id])
 
+    def _get_stair_bucket_stage_params(self):
+        """Return stage-specific promotion thresholds based on current bucket_id.
+
+        Conservatism at higher stages comes primarily from longer dwell time and
+        more required consecutive windows — NOT from sharply higher pass rates,
+        which would cause the curriculum to stall at hard buckets.
+
+        Stage 1 (bucket 0-1):  ~3.5/4.5/5.5 – 4.5/5.5/6.5 cm   fast startup
+        Stage 2 (bucket 2-4):  ~5.5/6.5/7.5 – 7.5/8.5/9.5 cm   moderate
+        Stage 3 (bucket 5-8):  ~8.5/9.5/10.5 – 11.5/12.5/13.5 cm  longer dwell
+        Stage 4 (bucket 9-12): ~12.5/13.5/14.5 – 15.5/16.5/17.5 cm most conservative
+        """
+        b = int(getattr(self, "stair_bucket_id", 0))
+        if b <= 1:  # stage 1
+            return dict(
+                min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage1_min_dwell_iters", 200)),
+                promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage1_promote_windows", 2)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_low_pass", 0.60)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_main_pass", 0.40)),
+                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_pass", 0.04)),
+                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage1_challenge_terminated_cap", 0.95)),
+                bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage1_bad_rate_cap", 0.55)),
+            )
+        elif b <= 4:  # stage 2
+            return dict(
+                min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage2_min_dwell_iters", 300)),
+                promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage2_promote_windows", 2)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_low_pass", 0.62)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_main_pass", 0.45)),
+                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage2_challenge_pass", 0.08)),
+                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage2_challenge_terminated_cap", 0.90)),
+                bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage2_bad_rate_cap", 0.50)),
+            )
+        elif b <= 8:  # stage 3
+            return dict(
+                min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage3_min_dwell_iters", 500)),
+                promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage3_promote_windows", 3)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_low_pass", 0.65)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_main_pass", 0.48)),
+                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage3_challenge_pass", 0.12)),
+                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage3_challenge_terminated_cap", 0.86)),
+                bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage3_bad_rate_cap", 0.45)),
+            )
+        else:  # stage 4: bucket 9-12
+            return dict(
+                min_dwell_iters=int(getattr(self.cfg.terrain, "stair_bucket_stage4_min_dwell_iters", 700)),
+                promote_windows=int(getattr(self.cfg.terrain, "stair_bucket_stage4_promote_windows", 4)),
+                low_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_low_pass", 0.68)),
+                main_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_main_pass", 0.52)),
+                challenge_pass=float(getattr(self.cfg.terrain, "stair_bucket_stage4_challenge_pass", 0.16)),
+                challenge_terminated_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage4_challenge_terminated_cap", 0.82)),
+                bad_rate_cap=float(getattr(self.cfg.terrain, "stair_bucket_stage4_bad_rate_cap", 0.40)),
+            )
+
     def _sample_stair_bucket_levels(self, num_samples):
         low_level, main_level, challenge_level = self._get_stair_bucket_levels()
-        probs = getattr(self.cfg.terrain, "stair_bucket_sample_probs", [0.25, 0.60, 0.15])
+        # Use phase-adaptive sampling probabilities
+        phase = getattr(self, "stair_bucket_phase", "normal")
+        if phase in ("entry", "recovery"):
+            probs = getattr(self.cfg.terrain, "stair_bucket_probs_recovery", [0.40, 0.55, 0.05])
+        elif phase == "probe":
+            probs = getattr(self.cfg.terrain, "stair_bucket_probs_probe", [0.20, 0.55, 0.25])
+        elif phase == "pre_promote":
+            probs = getattr(self.cfg.terrain, "stair_bucket_probs_pre_promote", [0.15, 0.55, 0.30])
+        else:  # "normal"
+            probs = getattr(self.cfg.terrain, "stair_bucket_probs_normal", [0.25, 0.60, 0.15])
         p_low = float(probs[0])
         p_main = float(probs[1])
-        # p_high is implicit; this makes the code robust if the three values do not sum exactly to 1.
         r = torch.rand(num_samples, device=self.device)
-
         levels = torch.full((num_samples,), challenge_level, dtype=torch.long, device=self.device)
         levels = torch.where(r < p_low + p_main, torch.full_like(levels, main_level), levels)
         levels = torch.where(r < p_low, torch.full_like(levels, low_level), levels)
@@ -134,6 +193,9 @@ class D1HMoEDisc(D1HMoEBase):
             return
 
         self.stair_bucket_id = int(getattr(self.cfg.terrain, "stair_bucket_initial_id", 0))
+        self.stair_bucket_phase = str(getattr(self.cfg.terrain, "stair_bucket_initial_phase", "entry"))
+        self.stair_bucket_phase_start_iter = 0
+        self.stair_bucket_start_iter = 0
         all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         self._resample_stair_bucket_env_origins(all_env_ids)
 
@@ -143,8 +205,17 @@ class D1HMoEDisc(D1HMoEBase):
 
         low_level, main_level, challenge_level = self._get_stair_bucket_levels()
         ff_scale = self._get_stair_bucket_ff_scale()
+        # Encode phase as float for TensorBoard: 0=entry, 1=recovery, 2=normal, 3=probe, 4=pre_promote
+        _PHASE_CODES = {"entry": 0.0, "recovery": 1.0, "normal": 2.0, "probe": 3.0, "pre_promote": 4.0}
+        phase_code = _PHASE_CODES.get(getattr(self, "stair_bucket_phase", "normal"), 2.0)
+        _b = int(getattr(self, "stair_bucket_id", 0))
+        _stage_num = 0 if _b <= 1 else (1 if _b <= 4 else (2 if _b <= 8 else 3))
+        _steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
+        _current_iter = int(getattr(self, "common_step_counter", 0) // _steps_per_iter)
+        _bucket_dwell = _current_iter - int(getattr(self, "stair_bucket_start_iter", 0))
         return {
             "stair_bucket_id": torch.as_tensor(float(getattr(self, "stair_bucket_id", 0)), device=self.device),
+            "stair_bucket_phase": torch.as_tensor(phase_code, device=self.device),
             "stair_bucket_low_level": torch.as_tensor(float(low_level), device=self.device),
             "stair_bucket_main_level": torch.as_tensor(float(main_level), device=self.device),
             "stair_bucket_challenge_level": torch.as_tensor(float(challenge_level), device=self.device),
@@ -152,7 +223,8 @@ class D1HMoEDisc(D1HMoEBase):
             "stair_bucket_low_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_low_pass_rate", 0.0)), device=self.device),
             "stair_bucket_main_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_main_pass_rate", 0.0)), device=self.device),
             "stair_bucket_challenge_pass_rate": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_pass_rate", 0.0)), device=self.device),
-            "stair_bucket_collapse_rate": torch.as_tensor(float(getattr(self, "stair_bucket_collapse_rate", 0.0)), device=self.device),
+            "stair_bucket_bad_rate": torch.as_tensor(float(getattr(self, "stair_bucket_bad_rate", 0.0)), device=self.device),
+            "stair_bucket_challenge_terminated_rate": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_terminated_rate", 0.0)), device=self.device),
             "stair_bucket_low_count": torch.as_tensor(float(getattr(self, "stair_bucket_low_count", 0)), device=self.device),
             "stair_bucket_main_count": torch.as_tensor(float(getattr(self, "stair_bucket_main_count", 0)), device=self.device),
             "stair_bucket_challenge_count": torch.as_tensor(float(getattr(self, "stair_bucket_challenge_count", 0)), device=self.device),
@@ -172,11 +244,8 @@ class D1HMoEDisc(D1HMoEBase):
                 / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
                 device=self.device,
             ),
-            "stair_bucket_challenge_terminated_rate": torch.as_tensor(
-                float(getattr(self, "stair_bucket_challenge_terminated_total", 0))
-                / max(float(getattr(self, "stair_bucket_challenge_total", 0)), 1.0),
-                device=self.device,
-            ),
+            "stair_bucket_stage_num": torch.as_tensor(float(_stage_num), device=self.device),
+            "stair_bucket_dwell_iters": torch.as_tensor(float(_bucket_dwell), device=self.device),
         }
 
     def _reset_stair_bucket_window(self):
@@ -187,7 +256,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_low_pass_total = 0
         self.stair_bucket_main_pass_total = 0
         self.stair_bucket_challenge_pass_total = 0
-        self.stair_bucket_collapse_total = 0
+        self.stair_bucket_bad_total = 0
         self.stair_bucket_challenge_step_success_sum = 0.0
         self.stair_bucket_challenge_x_progress_sum = 0.0
         self.stair_bucket_challenge_episode_time_sum = 0.0
@@ -199,30 +268,20 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_low_pass_rate = 0.0
         self.stair_bucket_main_pass_rate = 0.0
         self.stair_bucket_challenge_pass_rate = 0.0
-        self.stair_bucket_collapse_rate = 0.0
-
-    def _get_stair_bucket_promote_thresholds(self):
-        # Fast curriculum: early buckets should move quickly; high buckets become stricter.
-        b = int(getattr(self, "stair_bucket_id", 0))
-        if b < 4:
-            return (
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_main_rate_early", 0.35)),
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate_early", 0.10)),
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_max_collapse_rate_early", 0.50)),
-            )
-        if b < 9:
-            return (
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_main_rate_mid", 0.45)),
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate_mid", 0.15)),
-                float(getattr(self.cfg.terrain, "stair_bucket_promote_max_collapse_rate_mid", 0.40)),
-            )
-        return (
-            float(getattr(self.cfg.terrain, "stair_bucket_promote_main_rate_late", 0.55)),
-            float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate_late", 0.20)),
-            float(getattr(self.cfg.terrain, "stair_bucket_promote_max_collapse_rate_late", 0.35)),
-        )
+        self.stair_bucket_bad_rate = 0.0
+        self.stair_bucket_challenge_terminated_rate = 0.0
 
     def _update_stair_bucket_curriculum(self, env_ids, step_success, x_progress, episode_time, terminated_early):
+        """Monotonic stair-bucket curriculum: bucket_id only ever increases.
+
+        Phases (per-bucket):
+            entry       -> let policy adapt, minimal challenge sampling
+            recovery    -> main pass too low or challenge all-termination; reduce challenge ratio
+            normal      -> default steady state
+            probe       -> main/low stable, start probing challenge slice
+            pre_promote -> all conditions met; need N consecutive windows to promote
+        Bucket ID never decreases; instability triggers phase→recovery, not demotion.
+        """
         if not getattr(self.cfg.terrain, "stair_bucket_curriculum", False):
             return
         if env_ids is None or len(env_ids) == 0:
@@ -233,14 +292,11 @@ class D1HMoEDisc(D1HMoEBase):
 
         success_reward_threshold = float(getattr(self.cfg.terrain, "curriculum_success_reward_threshold", 3.0))
         success_down_threshold = float(getattr(self.cfg.terrain, "curriculum_success_down_threshold", 0.6))
-        success_min_distance = float(getattr(self.cfg.terrain, "curriculum_success_min_distance", 1.2))
-        success_min_episode_time = float(getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 5.0))
+        success_min_distance = float(getattr(self.cfg.terrain, "curriculum_success_min_distance", 1.0))
+        success_min_episode_time = float(getattr(self.cfg.terrain, "curriculum_success_min_episode_time", 4.0))
         collapse_min_distance = float(getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 0.4))
 
-        # Episode-level pass/collapse for bucket decisions.
-        # Do not use a pure "terminated_early == fail" rule here: some episodes can
-        # have already climbed and moved forward before ending. The curriculum should
-        # detect task competence, not merely timeout status.
+        # Pass definition
         basic_pass = (
             (step_success > success_reward_threshold)
             & (x_progress > success_min_distance)
@@ -253,6 +309,7 @@ class D1HMoEDisc(D1HMoEBase):
         )
         passed = basic_pass | strong_short_pass
 
+        # Bad episode definition (no-progress or early fall without meaningful travel)
         bad_no_progress = (step_success < success_down_threshold) & (x_progress < collapse_min_distance)
         bad_early_fall = (
             terminated_early
@@ -260,7 +317,7 @@ class D1HMoEDisc(D1HMoEBase):
             & (x_progress < 0.70 * success_min_distance)
             & (step_success < success_reward_threshold)
         )
-        collapsed = bad_no_progress | bad_early_fall
+        bad = bad_no_progress | bad_early_fall
 
         low_mask = levels == low_level
         main_mask = levels == main_level
@@ -279,15 +336,14 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_low_pass_total += int((passed & low_mask).sum().item())
         self.stair_bucket_main_pass_total += int((passed & main_mask).sum().item())
         self.stair_bucket_challenge_pass_total += int((passed & challenge_mask).sum().item())
-        self.stair_bucket_collapse_total += int((collapsed & bucket_mask).sum().item())
+        self.stair_bucket_bad_total += int((bad & bucket_mask).sum().item())
         if challenge_count > 0:
             self.stair_bucket_challenge_step_success_sum += float(step_success[challenge_mask].sum().item())
             self.stair_bucket_challenge_x_progress_sum += float(x_progress[challenge_mask].sum().item())
             self.stair_bucket_challenge_episode_time_sum += float(episode_time[challenge_mask].sum().item())
             self.stair_bucket_challenge_terminated_total += int(terminated_early[challenge_mask].sum().item())
 
-        # Log accumulated-window statistics. This makes TensorBoard reflect the exact
-        # window that is used for promotion/demotion instead of tiny reset batches.
+        # Update live statistics for TensorBoard
         self.stair_bucket_low_count = self.stair_bucket_low_total
         self.stair_bucket_main_count = self.stair_bucket_main_total
         self.stair_bucket_challenge_count = self.stair_bucket_challenge_total
@@ -295,102 +351,145 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_bucket_low_pass_rate = self.stair_bucket_low_pass_total / max(self.stair_bucket_low_total, 1)
         self.stair_bucket_main_pass_rate = self.stair_bucket_main_pass_total / max(self.stair_bucket_main_total, 1)
         self.stair_bucket_challenge_pass_rate = self.stair_bucket_challenge_pass_total / max(self.stair_bucket_challenge_total, 1)
-        self.stair_bucket_collapse_rate = self.stair_bucket_collapse_total / max(self.stair_bucket_total, 1)
+        self.stair_bucket_bad_rate = self.stair_bucket_bad_total / max(self.stair_bucket_total, 1)
+        self.stair_bucket_challenge_terminated_rate = (
+            self.stair_bucket_challenge_terminated_total / max(self.stair_bucket_challenge_total, 1)
+        )
 
+        # Check if it is time to make a phase/promotion decision
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
         current_iter = int(getattr(self, "common_step_counter", 0) // steps_per_iter)
-        interval = int(getattr(self.cfg.terrain, "stair_bucket_update_interval", 50))
-        cooldown = int(getattr(self.cfg.terrain, "stair_bucket_cooldown_iters", 50))
+        interval = int(getattr(self.cfg.terrain, "stair_bucket_update_interval", 100))
+        cooldown = int(getattr(self.cfg.terrain, "stair_bucket_cooldown_iters", 100))
         if current_iter - int(getattr(self, "stair_bucket_last_update_iter", 0)) < max(interval, cooldown):
             return
 
-        min_main_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_main_samples", 128))
-        min_challenge_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_challenge_samples", 32))
-        enough_promote_samples = (
-            self.stair_bucket_main_total >= min_main_samples
-            and self.stair_bucket_challenge_total >= min_challenge_samples
-        )
-        if not enough_promote_samples:
-            # Keep accumulating until there are enough samples for a meaningful decision.
-            return
+        min_main_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_main_samples", 256))
+        min_challenge_samples = int(getattr(self.cfg.terrain, "stair_bucket_min_challenge_samples", 64))
 
-        promote_main_rate, promote_challenge_rate, promote_max_collapse_rate = self._get_stair_bucket_promote_thresholds()
-        promote_windows = int(getattr(self.cfg.terrain, "stair_bucket_promote_windows", 1))
-        promote_low_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_low_rate", 0.55))
-        require_challenge_from_id = int(getattr(self.cfg.terrain, "stair_bucket_require_challenge_from_id", 3))
-        warmup_challenge_rate = float(getattr(self.cfg.terrain, "stair_bucket_promote_challenge_rate_warmup", 0.02))
+        # --- Phase-based monotonic curriculum ---
+        # Phases: entry -> (normal <-> probe <-> pre_promote) and (any -> recovery -> normal)
+        # bucket_id only goes up; demote is NEVER performed.
+        phase = getattr(self, "stair_bucket_phase", "normal")
+        phase_start_iter = int(getattr(self, "stair_bucket_phase_start_iter", 0))
+        phase_elapsed = current_iter - phase_start_iter
+
+        # Stage-specific thresholds: conservatism scales primarily through longer
+        # dwell time and more required windows, NOT through unreachably high pass rates.
+        stage_params = self._get_stair_bucket_stage_params()
+        entry_iters = int(getattr(self.cfg.terrain, "stair_bucket_entry_iters", 200))
+        recovery_iters = int(getattr(self.cfg.terrain, "stair_bucket_recovery_iters", 300))
+        promote_windows = stage_params["promote_windows"]
+        promote_low_rate = stage_params["low_pass"]
+        promote_main_rate = stage_params["main_pass"]
+        # probe bar is 50% of the full challenge threshold; pre_promote requires full
+        promote_challenge_rate_probe = stage_params["challenge_pass"] * 0.5
+        promote_challenge_rate_pre = stage_params["challenge_pass"]
+        challenge_terminated_cap = stage_params["challenge_terminated_cap"]
+        bad_rate_cap = stage_params["bad_rate_cap"]
+        # Instability: main far below threshold, OR challenge all-terminated, OR bad_rate too high
+        unstable_main_rate = promote_main_rate * 0.55
+        # Dwell: current bucket_id must have been active for at least min_dwell_iters before promoting
+        bucket_start_iter = int(getattr(self, "stair_bucket_start_iter", 0))
+        bucket_dwell = current_iter - bucket_start_iter
+        dwell_ok = bucket_dwell >= stage_params["min_dwell_iters"]
+
+        enough_main = self.stair_bucket_main_total >= min_main_samples
+        enough_challenge = self.stair_bucket_challenge_total >= min_challenge_samples
 
         low_ok = (
             self.stair_bucket_low_total < min_challenge_samples
             or self.stair_bucket_low_pass_rate >= promote_low_rate
         )
-        main_ok = self.stair_bucket_main_pass_rate >= promote_main_rate
-        if self.stair_bucket_id < require_challenge_from_id:
-            # Early buckets use challenge only as a sanity check. Challenge is an
-            # exposure signal here, not a hard mastery requirement.
-            challenge_ok = self.stair_bucket_challenge_pass_rate >= warmup_challenge_rate
-        else:
-            challenge_ok = self.stair_bucket_challenge_pass_rate >= promote_challenge_rate
-        collapse_ok = self.stair_bucket_collapse_rate <= promote_max_collapse_rate
-        promote_ok = low_ok and main_ok and challenge_ok and collapse_ok
-
-        if promote_ok:
-            self.stair_bucket_good_windows += 1
-        else:
-            self.stair_bucket_good_windows = 0
+        main_ok = enough_main and self.stair_bucket_main_pass_rate >= promote_main_rate
+        challenge_ok_probe = (
+            enough_challenge
+            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_probe
+            and self.stair_bucket_challenge_terminated_rate <= challenge_terminated_cap
+        )
+        challenge_ok_pre = (
+            enough_challenge
+            and self.stair_bucket_challenge_pass_rate >= promote_challenge_rate_pre
+            and self.stair_bucket_challenge_terminated_rate <= challenge_terminated_cap
+            and self.stair_bucket_bad_rate <= bad_rate_cap
+        )
+        is_unstable = (
+            (enough_main and self.stair_bucket_main_pass_rate < unstable_main_rate)
+            or (enough_challenge and self.stair_bucket_challenge_terminated_rate > challenge_terminated_cap)
+            or (self.stair_bucket_total >= min_main_samples and self.stair_bucket_bad_rate > bad_rate_cap)
+        )
 
         max_bucket = self._get_stair_bucket_max_id()
-        if self.stair_bucket_good_windows >= promote_windows and self.stair_bucket_id < max_bucket:
-            old_bucket = self.stair_bucket_id
-            self.stair_bucket_id += 1
-            self.stair_bucket_last_update_iter = current_iter
-            self.stair_bucket_good_windows = 0
-            self.stair_bucket_bad_windows = 0
+        new_phase = phase
+
+        if phase == "entry":
+            if phase_elapsed >= entry_iters:
+                new_phase = "recovery" if is_unstable else "normal"
+
+        elif phase == "recovery":
+            if phase_elapsed >= recovery_iters and enough_main and not is_unstable:
+                new_phase = "normal"
+
+        elif phase == "normal":
+            if is_unstable:
+                new_phase = "recovery"
+            elif low_ok and main_ok:
+                new_phase = "pre_promote" if challenge_ok_pre else "probe"
+
+        elif phase == "probe":
+            if is_unstable:
+                new_phase = "recovery"
+            elif low_ok and main_ok and challenge_ok_pre:
+                new_phase = "pre_promote"
+            elif not (low_ok and main_ok):
+                new_phase = "normal"
+
+        elif phase == "pre_promote":
+            if is_unstable or not (low_ok and main_ok):
+                new_phase = "probe"
+                self.stair_bucket_promote_good_windows = 0
+            elif challenge_ok_pre and dwell_ok:
+                self.stair_bucket_promote_good_windows += 1
+                if self.stair_bucket_promote_good_windows >= promote_windows and self.stair_bucket_id < max_bucket:
+                    old_bucket = self.stair_bucket_id
+                    self.stair_bucket_id += 1
+                    self.stair_bucket_phase = "entry"
+                    self.stair_bucket_phase_start_iter = current_iter
+                    self.stair_bucket_start_iter = current_iter  # reset dwell timer for new bucket
+                    self.stair_bucket_last_update_iter = current_iter
+                    self.stair_bucket_promote_good_windows = 0
+                    print(
+                        f"[stair bucket] PROMOTE {old_bucket} -> {self.stair_bucket_id}: "
+                        f"levels={self._get_stair_bucket_levels()}, "
+                        f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
+                        f"dwell_iters={bucket_dwell}, "
+                        f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
+                        f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
+                        f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
+                        f"challenge_term={self.stair_bucket_challenge_terminated_rate:.3f}, "
+                        f"bad_rate={self.stair_bucket_bad_rate:.3f}, "
+                        f"counts=({self.stair_bucket_low_total},{self.stair_bucket_main_total},{self.stair_bucket_challenge_total})"
+                    )
+                    self._reset_stair_bucket_window()
+                    return
+            else:
+                new_phase = "probe"
+                self.stair_bucket_promote_good_windows = 0
+
+        if new_phase != phase:
             print(
-                f"[stair bucket] promote {old_bucket} -> {self.stair_bucket_id}: "
-                f"levels={self._get_stair_bucket_levels()}, "
-                f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
-                f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
+                f"[stair bucket] phase {phase} -> {new_phase} "
+                f"(bucket={self.stair_bucket_id}, iter={current_iter}, dwell={bucket_dwell}, "
                 f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
                 f"challenge_pass={self.stair_bucket_challenge_pass_rate:.3f}, "
-                f"collapse={self.stair_bucket_collapse_rate:.3f}, "
-                f"counts=({self.stair_bucket_low_total}, {self.stair_bucket_main_total}, {self.stair_bucket_challenge_total})"
+                f"challenge_term={self.stair_bucket_challenge_terminated_rate:.3f}, "
+                f"bad={self.stair_bucket_bad_rate:.3f})"
             )
-            self._reset_stair_bucket_window()
-            return
+            self.stair_bucket_phase = new_phase
+            self.stair_bucket_phase_start_iter = current_iter
+            if new_phase in ("recovery", "entry"):
+                self.stair_bucket_promote_good_windows = 0
 
-        demote_main_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_main_rate", 0.25))
-        demote_low_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_low_rate", 0.35))
-        demote_collapse_rate = float(getattr(self.cfg.terrain, "stair_bucket_demote_collapse_rate", 0.60))
-        demote_windows = int(getattr(self.cfg.terrain, "stair_bucket_demote_windows", 3))
-        low_is_broken = self.stair_bucket_low_total >= min_challenge_samples and self.stair_bucket_low_pass_rate < demote_low_rate
-        main_is_broken = self.stair_bucket_main_total >= min_main_samples and self.stair_bucket_main_pass_rate < demote_main_rate
-        demote_ok = low_is_broken or (main_is_broken and self.stair_bucket_collapse_rate > demote_collapse_rate)
-
-        if demote_ok and self.stair_bucket_id > 0:
-            self.stair_bucket_bad_windows += 1
-        else:
-            self.stair_bucket_bad_windows = 0
-
-        if self.stair_bucket_bad_windows >= demote_windows and self.stair_bucket_id > 0:
-            old_bucket = self.stair_bucket_id
-            self.stair_bucket_id -= 1
-            self.stair_bucket_last_update_iter = current_iter
-            self.stair_bucket_good_windows = 0
-            self.stair_bucket_bad_windows = 0
-            print(
-                f"[stair bucket] demote {old_bucket} -> {self.stair_bucket_id}: "
-                f"levels={self._get_stair_bucket_levels()}, "
-                f"ff_scale={self._get_stair_bucket_ff_scale():.3f}, "
-                f"low_pass={self.stair_bucket_low_pass_rate:.3f}, "
-                f"main_pass={self.stair_bucket_main_pass_rate:.3f}, "
-                f"collapse={self.stair_bucket_collapse_rate:.3f}"
-            )
-            self._reset_stair_bucket_window()
-            return
-
-        # End this decision window and start a fresh one. This keeps adaptation fast
-        # while still using many episodes per decision.
         self.stair_bucket_last_update_iter = current_iter
         self._reset_stair_bucket_window()
 
@@ -1298,64 +1397,85 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         curriculum_allow_distance_promotion = False
         curriculum_max_terrain_level = 14
 
-        # Moving-window bucket curriculum.
-        # Bucket b samples [low, main, challenge] = [b, b+1, b+2].
-        # Bucket 0 therefore samples Level 0 / 1 / 2 with 25% / 60% / 15%,
-        # matching the stable low-difficulty startup behavior of Jun12_18-38-56_,
-        # while later buckets keep moving toward ~17 cm stairs.
+        # Monotonic stair-bucket curriculum (bucket_id only increases, never decreases).
+        # Bucket b: low=Level b, main=Level b+1, challenge=Level b+2.
         stair_bucket_curriculum = True
+        stair_bucket_monotonic = True
+        stair_bucket_adaptive_probs = True
         stair_bucket_initial_id = 0
+        stair_bucket_initial_phase = "entry"
         stair_bucket_first_low_level = 0
         stair_bucket_max_id = 12
-        stair_bucket_sample_probs = [0.25, 0.60, 0.15]
 
-        # Base feedforward remains 0.30/-0.60. These scales multiply it smoothly
-        # as the bucket moves upward; no sudden 0.43/-0.86 jump.
+        # Phase-adaptive sampling probabilities [low, main, challenge]
+        stair_bucket_probs_recovery   = [0.40, 0.55, 0.05]  # entry / recovery
+        stair_bucket_probs_normal     = [0.25, 0.60, 0.15]  # normal
+        stair_bucket_probs_probe      = [0.20, 0.55, 0.25]  # probe
+        stair_bucket_probs_pre_promote = [0.15, 0.55, 0.30]  # pre_promote
+
+        # Feedforward scale monotonically increases with bucket (base amp = 0.34/-0.68)
         stair_bucket_ff_scales = [
-            1.00,  # bucket 0: L0/L1/L2
+            1.00,  # bucket 0: L0/L1/L2   (~3.5/4.5/5.5 cm)
             1.00,  # bucket 1: L1/L2/L3
-            1.03,  # bucket 2: L2/L3/L4
-            1.06,  # bucket 3: L3/L4/L5
-            1.09,  # bucket 4: L4/L5/L6
-            1.12,  # bucket 5: L5/L6/L7
-            1.16,  # bucket 6: L6/L7/L8
-            1.20,  # bucket 7: L7/L8/L9
-            1.24,  # bucket 8: L8/L9/L10
-            1.28,  # bucket 9: L9/L10/L11
-            1.32,  # bucket 10: L10/L11/L12
-            1.36,  # bucket 11: L11/L12/L13
-            1.40,  # bucket 12: L12/L13/L14, challenge ~17.5 cm
+            1.04,  # bucket 2: L2/L3/L4
+            1.08,  # bucket 3: L3/L4/L5
+            1.12,  # bucket 4: L4/L5/L6
+            1.17,  # bucket 5: L5/L6/L7
+            1.22,  # bucket 6: L6/L7/L8
+            1.27,  # bucket 7: L7/L8/L9
+            1.32,  # bucket 8: L8/L9/L10
+            1.37,  # bucket 9: L9/L10/L11
+            1.42,  # bucket 10: L10/L11/L12
+            1.47,  # bucket 11: L11/L12/L13
+            1.52,  # bucket 12: L12/L13/L14 (~15.5/16.5/17.5 cm)
         ]
 
-        # Promotion: main level must be stable, challenge level must have begun
-        # to succeed, and the overall collapse rate must stay low.
-        stair_bucket_update_interval = 50
-        stair_bucket_cooldown_iters = 50
-        stair_bucket_min_main_samples = 128
-        stair_bucket_min_challenge_samples = 32
-        stair_bucket_promote_low_rate = 0.55
-        stair_bucket_require_challenge_from_id = 3
-        stair_bucket_promote_challenge_rate_warmup = 0.02
-        stair_bucket_promote_main_rate = 0.55
-        stair_bucket_promote_main_rate_early = 0.34
-        stair_bucket_promote_main_rate_mid = 0.44
-        stair_bucket_promote_main_rate_late = 0.54
-        stair_bucket_promote_challenge_rate = 0.20
-        stair_bucket_promote_challenge_rate_early = 0.08
-        stair_bucket_promote_challenge_rate_mid = 0.12
-        stair_bucket_promote_challenge_rate_late = 0.18
-        stair_bucket_promote_max_collapse_rate = 0.40
-        stair_bucket_promote_max_collapse_rate_early = 0.60
-        stair_bucket_promote_max_collapse_rate_mid = 0.50
-        stair_bucket_promote_max_collapse_rate_late = 0.40
-        stair_bucket_promote_windows = 1
+        # Decision window settings
+        stair_bucket_update_interval = 100
+        stair_bucket_cooldown_iters = 100
+        stair_bucket_min_main_samples = 256
+        stair_bucket_min_challenge_samples = 64
 
-        # Demotion is conservative; fall back only when the current/easy levels
-        # are broken, not merely because challenge samples fail.
-        stair_bucket_demote_main_rate = 0.25
-        stair_bucket_demote_low_rate = 0.35
-        stair_bucket_demote_collapse_rate = 0.60
-        stair_bucket_demote_windows = 3
+        # Phase timing (in training iterations)
+        stair_bucket_entry_iters = 200
+        stair_bucket_recovery_iters = 300
+
+        # Stage-specific promotion parameters.
+        # Higher stages get longer dwell and more windows, NOT sharply higher pass rates.
+        # This avoids stalling the curriculum at hard buckets.
+        #
+        # Stage 1: bucket 0-1  (main ~4.5-5.5 cm)  fast startup
+        stair_bucket_stage1_min_dwell_iters = 200
+        stair_bucket_stage1_promote_windows = 2
+        stair_bucket_stage1_low_pass = 0.60
+        stair_bucket_stage1_main_pass = 0.40
+        stair_bucket_stage1_challenge_pass = 0.04
+        stair_bucket_stage1_challenge_terminated_cap = 0.95
+        stair_bucket_stage1_bad_rate_cap = 0.55
+        # Stage 2: bucket 2-4  (main ~6.5-8.5 cm)  moderate
+        stair_bucket_stage2_min_dwell_iters = 300
+        stair_bucket_stage2_promote_windows = 2
+        stair_bucket_stage2_low_pass = 0.62
+        stair_bucket_stage2_main_pass = 0.45
+        stair_bucket_stage2_challenge_pass = 0.08
+        stair_bucket_stage2_challenge_terminated_cap = 0.90
+        stair_bucket_stage2_bad_rate_cap = 0.50
+        # Stage 3: bucket 5-8  (main ~9.5-12.5 cm)  longer dwell, 3 windows
+        stair_bucket_stage3_min_dwell_iters = 500
+        stair_bucket_stage3_promote_windows = 3
+        stair_bucket_stage3_low_pass = 0.65
+        stair_bucket_stage3_main_pass = 0.48
+        stair_bucket_stage3_challenge_pass = 0.12
+        stair_bucket_stage3_challenge_terminated_cap = 0.86
+        stair_bucket_stage3_bad_rate_cap = 0.45
+        # Stage 4: bucket 9-12 (main ~13.5-16.5 cm)  most conservative, 4 windows
+        stair_bucket_stage4_min_dwell_iters = 700
+        stair_bucket_stage4_promote_windows = 4
+        stair_bucket_stage4_low_pass = 0.68
+        stair_bucket_stage4_main_pass = 0.52
+        stair_bucket_stage4_challenge_pass = 0.16
+        stair_bucket_stage4_challenge_terminated_cap = 0.82
+        stair_bucket_stage4_bad_rate_cap = 0.40
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -1377,30 +1497,28 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class control(D1HMoEBaseCfg.control):
         stair_ff_enabled = True
-        stair_ff_period = 0.65
+        stair_ff_period = 0.70
         stair_ff_k = 1.0
         stair_ff_contact_threshold = 100.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_require_step_context = True
-        stair_ff_min_forward_travel = 0.15
+        stair_ff_min_forward_travel = 0.12
         stair_ff_require_blocking = True
         stair_ff_blocking_speed_fraction = 0.65
-        stair_ff_blocking_speed_max = 0.22
+        stair_ff_blocking_speed_max = 0.24
         stair_ff_followup_delay_factor = 0.35
         stair_ff_contact_smooth_frames = 3
-        # Stage A: keep feedforward available while terrain buckets move upward.
-        # Speed curriculum and feedforward annealing come in the next stage after
-        # the high-stair bucket is reached.
+        # Feedforward annealing disabled; scale is fixed and grows with bucket.
         stair_ff_anneal_enabled = False
-        stair_ff_anneal_start_iter = 1000
-        stair_ff_anneal_end_iter = 9000
+        stair_ff_anneal_override_scale = None
         stair_ff_anneal_final_scale = 1.0
         stair_ff_anneal_steps_per_iter = 32
+        # Enhanced base amplitudes for fresh training (bucket ff_scale multiplies these)
         stair_ff_joint_amplitudes = {
-            "FL_thigh_joint": 0.30,
-            "FL_calf_joint": -0.60,
-            "FR_thigh_joint": 0.30,
-            "FR_calf_joint": -0.60,
+            "FL_thigh_joint": 0.34,
+            "FL_calf_joint": -0.68,
+            "FR_thigh_joint": 0.34,
+            "FR_calf_joint": -0.68,
         }
 
     class rewards(D1HMoEBaseCfg.rewards):
@@ -1525,11 +1643,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
-            step_clearance = 1.0
-            step_lift = 2.0
+            step_clearance = 1.5
+            step_lift = 3.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
-            step_leg_imbalance = -8.0
+            step_leg_imbalance = -10.0
             step_progress = 15.0
             step_up = 60.0
             step_success = 80.0
@@ -1577,12 +1695,14 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         cost_viol_loss_coef = 0.05
 
     class policy(D1HMoEBaseCfgPPO.policy):
-        actor_hidden_dims = [512, 256, 128]
-        barlow_actor_hidden_dims = [512, 256, 128]
-        barlow_mlp_encoder_dims = [128, 64]
-        barlow_latent_dim = 16
-        barlow_obs_encoder_dims = [128, 64]
-        critic_hidden_dims = [512, 256, 128]
+        # Smaller residual expert: only actor is deployed, so keep it compact.
+        # Critic is train-only and can be slightly larger for value stability.
+        actor_hidden_dims = [128, 64]
+        critic_hidden_dims = [256, 128]
+        barlow_actor_hidden_dims = [128, 64]
+        barlow_mlp_encoder_dims = [96, 48]
+        barlow_obs_encoder_dims = [96, 48]
+        barlow_latent_dim = 12
         init_noise_std = 0.45
 
     class runner(D1HMoEBaseCfgPPO.runner):

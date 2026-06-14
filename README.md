@@ -53,21 +53,21 @@ python scripts/train_residual.py \
   --stair_ff_anneal_iter_offset 7500 \
   --reset_residual_std 0.60
 
-  python scripts/train_residual.py \
+
+python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
   --max_iterations 12000 \
-  --residual_alpha 0.50 \
-  --residual_alpha_warmup_steps 1200 \
-  --residual_alpha_warmup_min 0.30 \
+  --residual_alpha 0.5 \
+  --residual_alpha_warmup_steps 1000 \
+  --residual_alpha_warmup_min 0.25 \
   --residual_delta_clip 0.45 \
-  --residual_std_min 0.35 \
-  --residual_std_max 0.75
-
-
+  --residual_std_min 0.30 \
+  --residual_std_max 0.65 \
+  --stair_ff_scale 1.0
 
 推理moe
 python scripts/play_residual.py \

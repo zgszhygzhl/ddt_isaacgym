@@ -48,7 +48,10 @@ class NP3O:
         self.actor_critic = actor_critic
         self.actor_critic.to(self.device)
         self.storage = None # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(
+            [p for p in self.actor_critic.parameters() if p.requires_grad],
+            lr=learning_rate
+        )
 
         if hasattr(self.actor_critic, 'imitation_learning_loss') and self.actor_critic.imi_flag:
             self.imi_flag = True

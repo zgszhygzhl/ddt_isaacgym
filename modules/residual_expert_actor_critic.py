@@ -111,6 +111,8 @@ class ResidualExpertActorCritic(nn.Module):
         self.residual_actor_critic.train(mode)
         if self.freeze_base:
             self.base_actor_critic.eval()
+            for p in self.base_actor_critic.parameters():
+                p.requires_grad = False
         else:
             self.base_actor_critic.train(mode)
         return self
