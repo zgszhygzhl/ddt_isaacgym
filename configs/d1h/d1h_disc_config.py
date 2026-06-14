@@ -387,7 +387,10 @@ class D1HMoEDisc(D1HMoEBase):
         promote_challenge_rate_pre = stage_params["challenge_pass"]
         challenge_terminated_cap = stage_params["challenge_terminated_cap"]
         bad_rate_cap = stage_params["bad_rate_cap"]
-        # Instability: main far below threshold, OR challenge all-terminated, OR bad_rate too high
+        # Instability: protect basic learning with main/bad statistics. Challenge
+        # termination becomes a recovery signal only after entering a challenge
+        # evaluation phase; otherwise a weak challenge slice can trap the bucket
+        # in recovery before the main level is learned.
         unstable_main_rate = promote_main_rate * 0.55
         # Dwell: current bucket_id must have been active for at least min_dwell_iters before promoting
         bucket_start_iter = int(getattr(self, "stair_bucket_start_iter", 0))
@@ -413,11 +416,16 @@ class D1HMoEDisc(D1HMoEBase):
             and self.stair_bucket_challenge_terminated_rate <= challenge_terminated_cap
             and self.stair_bucket_bad_rate <= bad_rate_cap
         )
-        is_unstable = (
+        base_unstable = (
             (enough_main and self.stair_bucket_main_pass_rate < unstable_main_rate)
-            or (enough_challenge and self.stair_bucket_challenge_terminated_rate > challenge_terminated_cap)
             or (self.stair_bucket_total >= min_main_samples and self.stair_bucket_bad_rate > bad_rate_cap)
         )
+        challenge_unstable = (
+            phase in ("probe", "pre_promote")
+            and enough_challenge
+            and self.stair_bucket_challenge_terminated_rate > challenge_terminated_cap
+        )
+        is_unstable = base_unstable or challenge_unstable
 
         max_bucket = self._get_stair_bucket_max_id()
         new_phase = phase
@@ -1383,10 +1391,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
         num_rows = 15
-        step_height = [0.035, 0.185]
+        step_height = [0.03, 0.18]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
-        slope_treshold = 0.3
+        slope_treshold = 0.25
         curriculum_move_up_distance = 6.0
         curriculum_move_down_expected_factor = 0.25
         curriculum_move_down_min_distance = 0.35
@@ -1499,7 +1507,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_enabled = True
         stair_ff_period = 0.70
         stair_ff_k = 1.0
-        stair_ff_contact_threshold = 100.0
+        stair_ff_contact_threshold = 40.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_require_step_context = True
         stair_ff_min_forward_travel = 0.12
@@ -1507,7 +1515,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_blocking_speed_fraction = 0.65
         stair_ff_blocking_speed_max = 0.24
         stair_ff_followup_delay_factor = 0.35
-        stair_ff_contact_smooth_frames = 3
+        stair_ff_contact_smooth_frames = 2
         # Feedforward annealing disabled; scale is fixed and grows with bucket.
         stair_ff_anneal_enabled = False
         stair_ff_anneal_override_scale = None
