@@ -65,8 +65,8 @@ python scripts/train_residual.py \
   --residual_alpha_warmup_steps 1000 \
   --residual_alpha_warmup_min 0.25 \
   --residual_delta_clip 0.45 \
-  --residual_std_min 0.30 \
-  --residual_std_max 0.65 \
+  --residual_std_min 0.35 \
+  --residual_std_max 0.75 \
   --stair_ff_scale 1.0
 
 推理moe

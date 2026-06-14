@@ -1391,7 +1391,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
         num_rows = 15
-        step_height = [0.03, 0.18]
+        step_height = [0.028, 0.178]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.25
@@ -1416,7 +1416,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_bucket_max_id = 12
 
         # Phase-adaptive sampling probabilities [low, main, challenge]
-        stair_bucket_probs_recovery   = [0.40, 0.55, 0.05]  # entry / recovery
+        stair_bucket_probs_recovery   = [0.70, 0.28, 0.02]  # entry / recovery
         stair_bucket_probs_normal     = [0.25, 0.60, 0.15]  # normal
         stair_bucket_probs_probe      = [0.20, 0.55, 0.25]  # probe
         stair_bucket_probs_pre_promote = [0.15, 0.55, 0.30]  # pre_promote
@@ -1689,7 +1689,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         residual_l2_coef = 0.05
         learning_rate = 3.0e-4
         learning_rate_min = 9.0e-5
-        learning_rate_max = 9.0e-3
+        learning_rate_max = 3.0e-3
         schedule = "adaptive"
         desired_kl = 0.01
         gamma = 0.995
