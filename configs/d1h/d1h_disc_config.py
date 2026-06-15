@@ -1,6 +1,7 @@
 import math
 
 import torch
+from utils.stair_ik_feedforward import compute_stair_ik_ff_offsets_b
 
 from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
@@ -21,6 +22,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_cooldown_until = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
+        self.last_stair_ff_offsets = torch.zeros(self.num_envs, self.num_actions, device=self.device)
 
     def reset_idx(self, env_ids):
         ff_contact_hit_ratio = None
@@ -56,6 +58,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_cooldown_until[env_ids] = 0.0
         self.stair_ff_contact_hit_sum[env_ids] = 0.0
         self.stair_ff_active_sum[env_ids] = 0.0
+        self.last_stair_ff_offsets[env_ids] = 0.0
 
     def step(self, actions):
         actions = self._apply_stair_feedforward(actions)
@@ -172,13 +175,27 @@ class D1HMoEDisc(D1HMoEBase):
             self.stair_followup_used[trigger_mask, side] = True
 
     def _update_stair_feedforward_state(self):
+        """Update the blind stair-rescue feedforward state.
+
+        The first trigger is conservative enough to avoid ordinary ground contact:
+        it requires a forward command, sufficient travelled distance, sustained
+        contact force, and a mild blocked-motion condition.  Follow-up triggering
+        is not based on a second impact; instead, it starts the other leg when the
+        first leg reaches the middle-late phase and the robot posture is still
+        acceptable.  This avoids both extremes: simultaneous leg lifting and a
+        second leg that never follows.
+        """
         if not getattr(self.cfg.control, "stair_ff_enabled", True):
             self.last_stair_ff_signal.zero_()
+            if hasattr(self, "last_stair_ff_offsets"):
+                self.last_stair_ff_offsets.zero_()
             return
 
         contact_forces = self._get_stair_ff_contact_forces()
         if contact_forces is None:
             self.last_stair_ff_signal.zero_()
+            if hasattr(self, "last_stair_ff_offsets"):
+                self.last_stair_ff_offsets.zero_()
             return
 
         self.stair_contact_hist = torch.cat(
@@ -190,45 +207,68 @@ class D1HMoEDisc(D1HMoEBase):
         recent_contact = self.stair_contact_hist[:, :, -stable_frames:]
         smooth_contact = recent_contact.mean(dim=2)
 
-        duration = max(getattr(self.cfg.control, "stair_ff_duration", 0.48), 1e-6)
-        followup_delay = min(
-            max(getattr(self.cfg.control, "stair_ff_followup_delay", 0.42), 0.0),
-            duration,
-        )
-        threshold = getattr(self.cfg.control, "stair_ff_contact_threshold", 50.0)
+        duration = max(float(getattr(self.cfg.control, "stair_ff_duration", 0.48)), 1e-6)
+        followup_phase = float(getattr(self.cfg.control, "stair_ff_followup_phase", 0.65))
+        followup_phase = min(max(followup_phase, 0.0), 1.0)
+        threshold = float(getattr(self.cfg.control, "stair_ff_contact_threshold", 55.0))
         episode_time = self.episode_length_buf.float() * self.dt
 
         trigger_arm = self._get_stair_ff_trigger_arm()
         stable_contact = (recent_contact > threshold).all(dim=2)
-        contact_hit = stable_contact & (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
+        raw_contact_hit = stable_contact & (smooth_contact > threshold) & trigger_arm.unsqueeze(1)
+
+        # Blind-walking trigger: a high contact force only matters when the robot
+        # is trying to go forward but its forward velocity is clearly suppressed.
+        cmd_x = self.commands[:, 0]
+        base_vx = self.base_lin_vel[:, 0]
+        min_cmd_x = float(getattr(self.cfg.control, "stair_ff_min_cmd_x", 0.12))
+        jam_speed_ratio = float(getattr(self.cfg.control, "stair_ff_jam_speed_ratio", 0.55))
+        jam_abs_speed = float(getattr(self.cfg.control, "stair_ff_jam_abs_speed", 0.12))
+        forward_cmd = cmd_x > min_cmd_x
+        slow_by_ratio = base_vx < cmd_x * jam_speed_ratio
+        slow_by_abs = base_vx < jam_abs_speed
+        blocked_motion = forward_cmd & (slow_by_ratio | slow_by_abs)
+
+        upright_score = torch.clamp(-self.projected_gravity[:, 2], 0.0, 1.0)
+        min_upright = float(getattr(self.cfg.control, "stair_ff_min_upright", 0.62))
+        upright_ok = upright_score > min_upright
+
+        base_height = self._get_base_heights() if hasattr(self, "_get_base_heights") else self.root_states[:, 2]
+        min_base_height = float(getattr(self.cfg.control, "stair_ff_min_base_height", 0.30))
+        height_ok = base_height > min_base_height
+
+        posture_ok = forward_cmd & upright_ok & height_ok
+        contact_hit = raw_contact_hit & blocked_motion.unsqueeze(1) & posture_ok.unsqueeze(1)
         self.stair_ff_contact_hit_sum += contact_hit.any(dim=1).float()
 
+        # First trigger is mutually exclusive: if both sides hit, lift the side
+        # with the stronger contact force.  Do not lift both legs at the same time.
         both_hit = contact_hit[:, 0] & contact_hit[:, 1]
         left_stronger = smooth_contact[:, 0] >= smooth_contact[:, 1]
         no_active = ~self.stair_lift_active.any(dim=1)
-        first_ready = no_active
-        left_first = first_ready & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
-        right_first = first_ready & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
+        left_first = no_active & ((contact_hit[:, 0] & ~contact_hit[:, 1]) | (both_hit & left_stronger))
+        right_first = no_active & ((contact_hit[:, 1] & ~contact_hit[:, 0]) | (both_hit & ~left_stronger))
         self._trigger_stair_lift(left_first, 0, episode_time)
         self._trigger_stair_lift(right_first, 1, episode_time)
 
-        left_since_right = episode_time - self.last_stair_trigger[:, 1]
-        right_since_left = episode_time - self.last_stair_trigger[:, 0]
+        # Follow-up is phase based rather than impact based.  It waits until the
+        # first leg is in the middle-late part of the rescue motion, then starts
+        # the other leg if the robot is still upright and high enough.
         left_followup = (
             self.stair_lift_active[:, 1]
             & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
             & ~self.stair_followup_used[:, 0]
-            & (left_since_right >= followup_delay)
-            & contact_hit[:, 0]
+            & (self.stair_lift_phase[:, 1] >= followup_phase)
+            & posture_ok
         )
         right_followup = (
             self.stair_lift_active[:, 0]
             & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
             & ~self.stair_followup_used[:, 1]
-            & (right_since_left >= followup_delay)
-            & contact_hit[:, 1]
+            & (self.stair_lift_phase[:, 0] >= followup_phase)
+            & posture_ok
         )
         self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
         self._trigger_stair_lift(right_followup, 1, episode_time, is_followup=True)
@@ -259,28 +299,42 @@ class D1HMoEDisc(D1HMoEBase):
         return actions
 
     def _get_stair_ff_joint_target_offsets(self):
+        """Return stair IK feedforward joint-target offsets in radians.
+
+        This function does not return policy actions.  The returned value is added
+        after `default_dof_pos + action_scale * actions`, so the unit is rad.
+        """
         ff_offset = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         if not getattr(self.cfg.control, "stair_ff_enabled", True):
+            if hasattr(self, "last_stair_ff_offsets"):
+                self.last_stair_ff_offsets.zero_()
             return ff_offset
-        if not torch.any(self.stair_lift_active):
+        if not hasattr(self, "stair_lift_active") or not torch.any(self.stair_lift_active):
+            if hasattr(self, "last_stair_ff_offsets"):
+                self.last_stair_ff_offsets.zero_()
             return ff_offset
 
-        joint_amplitudes = getattr(self.cfg.control, "stair_ff_joint_amplitudes", {})
-        for joint_name, amplitude in joint_amplitudes.items():
-            if not hasattr(self, "dof_names") or joint_name not in self.dof_names:
-                continue
-            joint_idx = self.dof_names.index(joint_name)
-            if joint_idx in self.foot_joint_indices:
-                continue
-            side = 0 if joint_name.startswith("FL_") else 1 if joint_name.startswith("FR_") else None
-            if side is None:
-                continue
-            ff_offset[:, joint_idx] += self.last_stair_ff_signal[:, side] * amplitude
+        ff_offset = compute_stair_ik_ff_offsets_b(
+            phase_local=self.stair_lift_phase,
+            active=self.stair_lift_active,
+            dof_names=self.dof_names,
+            num_actions=self.num_actions,
+            device=self.device,
+            cfg_control=self.cfg.control,
+        )
 
-        k_ff = getattr(self.cfg.control, "stair_ff_k", 0.35)
+        k_ff = float(getattr(self.cfg.control, "stair_ff_k", 0.55))
         anneal_scale = self._get_stair_ff_anneal_scale()
         ff_gate = self._get_stair_ff_gate().unsqueeze(1)
-        return ff_gate * k_ff * anneal_scale * ff_offset
+        ff_offset = ff_gate * k_ff * anneal_scale * ff_offset
+
+        final_max = float(getattr(self.cfg.control, "stair_ff_final_max_offset", 0.65))
+        if final_max > 0.0:
+            ff_offset = torch.clamp(ff_offset, -final_max, final_max)
+
+        if hasattr(self, "last_stair_ff_offsets"):
+            self.last_stair_ff_offsets = ff_offset.detach()
+        return ff_offset
 
     def _compute_torques(self, actions):
         """Compute torques with stair feedforward injected as joint-target offsets."""
@@ -322,36 +376,8 @@ class D1HMoEDisc(D1HMoEBase):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _update_terrain_curriculum(self, env_ids):
-        """Use one transparent forward-distance rule for the stair curriculum."""
-        if not self.init_done:
-            return
-
-        forward_progress = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
-        move_up_distance = float(getattr(self.cfg.terrain, "curriculum_move_up_distance", 3.0))
-        move_up = forward_progress > move_up_distance
-
-        episode_time = self.episode_length_buf[env_ids].float() * self.dt
-        expected_progress = torch.clamp(self.commands[env_ids, 0], min=0.0) * episode_time
-        down_factor = float(getattr(self.cfg.terrain, "curriculum_move_down_expected_factor", 0.25))
-        down_floor = float(getattr(self.cfg.terrain, "curriculum_move_down_min_distance", 0.35))
-        move_down_threshold = torch.maximum(
-            expected_progress * down_factor,
-            torch.full_like(expected_progress, down_floor),
-        )
-        move_down = (forward_progress < move_down_threshold) & ~move_up
-
-        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
-        self.terrain_levels[env_ids] = torch.where(
-            self.terrain_levels[env_ids] >= self.max_terrain_level,
-            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-            torch.clamp(self.terrain_levels[env_ids], min=0),
-        )
-        self.env_origins[env_ids] = self.terrain_origins[
-            self.terrain_levels[env_ids], self.terrain_types[env_ids]
-        ]
-
-        self._terrain_forward_progress = forward_progress.detach()
-        self._terrain_move_up = move_up.detach()
+        """Use the base task terrain-curriculum rule without expert-specific overrides."""
+        return super()._update_terrain_curriculum(env_ids)
 
     def _get_step_lift_context(self):
         zeros = torch.zeros(self.num_envs, device=self.device)
@@ -628,27 +654,29 @@ class D1HMoEDisc(D1HMoEBase):
         return reward * active.float() * lifting.float() * self._get_stair_posture_gate()
 
     def _reward_stair_ff_tracking(self):
-        """Teach the policy to cooperate with the active feedforward joint target."""
-        if not hasattr(self, "last_stair_ff_signal") or not torch.any(self.stair_lift_active):
+        """Teach the policy/body to cooperate with the active IK feedforward target."""
+        if (
+            not hasattr(self, "last_stair_ff_offsets")
+            or not hasattr(self, "stair_lift_active")
+            or not torch.any(self.stair_lift_active)
+        ):
             return torch.zeros(self.num_envs, device=self.device)
 
-        joint_amplitudes = getattr(self.cfg.control, "stair_ff_joint_amplitudes", {})
-        ff_scale = float(getattr(self.cfg.control, "stair_ff_k", 1.0))
-        ff_scale *= float(self._get_stair_ff_anneal_scale().item())
         sq_error = torch.zeros(self.num_envs, device=self.device)
         active_count = torch.zeros(self.num_envs, device=self.device)
-        for joint_name, amplitude in joint_amplitudes.items():
+        tracked_joint_names = [
+            ("FL_thigh_joint", 0),
+            ("FL_calf_joint", 0),
+            ("FR_thigh_joint", 1),
+            ("FR_calf_joint", 1),
+        ]
+
+        for joint_name, side in tracked_joint_names:
             if joint_name not in self.dof_names:
                 continue
             joint_idx = self.dof_names.index(joint_name)
-            side = 0 if joint_name.startswith("FL_") else 1 if joint_name.startswith("FR_") else None
-            if side is None:
-                continue
             active = self.stair_lift_active[:, side]
-            target = (
-                self.default_dof_pos[:, joint_idx]
-                + self.last_stair_ff_signal[:, side] * amplitude * ff_scale
-            )
+            target = self.default_dof_pos[:, joint_idx] + self.last_stair_ff_offsets[:, joint_idx]
             sq_error += torch.square(self.dof_pos[:, joint_idx] - target) * active.float()
             active_count += active.float()
 
@@ -933,11 +961,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
-        # The robot starts near the center of an 8 m tile. Requiring 4 m means
-        # reaching the tile boundary; 3 m still requires sustained traversal.
-        curriculum_move_up_distance = 3.0
-        curriculum_move_down_expected_factor = 0.25
-        curriculum_move_down_min_distance = 0.35
+        # Terrain promotion/demotion criteria are intentionally inherited from D1HMoEBase.
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -959,26 +983,51 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class control(D1HMoEBaseCfg.control):
         stair_ff_enabled = True
+
+        # IK rescue feedforward timing.  The follow-up is phase based: 0.64 means
+        # the second leg starts after the first leg has finished roughly two thirds
+        # of its rescue trajectory.  This is less aggressive than 0.50, but much
+        # less likely to miss the second leg than the old 0.42 s impact-gated rule.
         stair_ff_duration = 0.48
-        stair_ff_followup_delay = 0.42
-        stair_ff_cooldown = 0.18
-        stair_ff_k = 1.0
-        stair_ff_contact_threshold = 50.0
+        stair_ff_followup_phase = 0.64
+        stair_ff_cooldown = 0.20
+
+        # B-scheme IK feedforward strength and shaping.
+        stair_ff_k = 0.55
+        stair_ff_phase_start = 0.30
+        stair_ff_ramp_ratio = 0.06
+        stair_ff_max_offset = 1.20
+        stair_ff_final_max_offset = 0.65
+
+        # IK geometry.  z_hip=0.45 matches the default thigh/calf posture more
+        # closely than 0.40 in the MATLAB check.
+        stair_ff_l1 = 0.25
+        stair_ff_l2 = 0.25
+        stair_ff_wheel_radius = 0.085
+        stair_ff_step_height = 0.15
+        stair_ff_x0 = 0.05
+        stair_ff_x1 = 0.35
+        stair_ff_z_hip = 0.45
+        stair_ff_h_margin = 0.05
+
+        # Blind trigger: sustained contact plus mild blocked-motion evidence.
+        # These are intentionally not too strict, because the robot has no exteroceptive
+        # perception and must react from proprioceptive/contact information.
+        stair_ff_contact_threshold = 55.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
         stair_ff_contact_stable_frames = 3
+        stair_ff_min_cmd_x = 0.12
+        stair_ff_jam_speed_ratio = 0.55
+        stair_ff_jam_abs_speed = 0.12
+        stair_ff_min_upright = 0.62
+        stair_ff_min_base_height = 0.30
+
         # Feedforward annealing is disabled during terrain adaptation.
         stair_ff_anneal_enabled = False
         stair_ff_anneal_override_scale = None
         stair_ff_anneal_final_scale = 1.0
         stair_ff_anneal_steps_per_iter = 32
-        # Keep the existing pulse amplitude; fix timing before changing strength.
-        stair_ff_joint_amplitudes = {
-            "FL_thigh_joint": 0.34,
-            "FL_calf_joint": -0.57,
-            "FR_thigh_joint": 0.34,
-            "FR_calf_joint": -0.57,
-        }
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
