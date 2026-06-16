@@ -58,15 +58,32 @@ python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
-  --resume \
-  --load_run Jun15_01-45-15_ \
-  --checkpoint 1000 \
   --headless \
   --num_envs 4096 \
-  --max_iterations 20000 \
+  --max_iterations 5000 \
   --residual_alpha 0.5 \
   --residual_alpha_warmup_steps 1 \
   --residual_alpha_warmup_min 1.0 \
+  --residual_delta_clip 0.55 \
+  --residual_std_min 0.35 \
+  --residual_std_max 0.75 \
+  --stair_ff_scale 1.0 \
+  --resume \
+  --load_run Jun16_02-28-04_ \
+  --checkpoint 600 \
+
+
+
+  python scripts/train_residual.py \
+  --task d1h_moe_disc \
+  --base_task d1h_moe_base \
+  --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
+  --headless \
+  --num_envs 4096 \
+  --max_iterations 9000 \
+  --residual_alpha 0.5 \
+  --residual_alpha_warmup_steps 500 \
+  --residual_alpha_warmup_min 0.5 \
   --residual_delta_clip 0.35 \
   --residual_std_min 0.3 \
   --residual_std_max 0.75 \

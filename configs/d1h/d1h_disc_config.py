@@ -160,17 +160,33 @@ class D1HMoEDisc(D1HMoEBase):
         )
         if not torch.any(trigger_mask):
             return
+
         if not is_followup:
+            # A new first-leg trigger starts a new two-leg rescue sequence.
             self.stair_followup_used[trigger_mask] = False
+
         self.stair_lift_active[trigger_mask, side] = True
-        self.stair_lift_phase[trigger_mask, side] = 0.0
+
+        # Follow-up legs often start after the robot has already contacted or
+        # climbed the stair edge.  Start them slightly inside the local phase so
+        # the IK feedforward enters the lifting segment faster, without making
+        # the two legs lift fully simultaneously.
+        if is_followup:
+            phase_init = float(getattr(self.cfg.control, "stair_ff_followup_phase_init", 0.06))
+            phase_init = min(max(phase_init, 0.0), 0.35)
+        else:
+            phase_init = 0.0
+        self.stair_lift_phase[trigger_mask, side] = phase_init
+
         self.stair_lift_side[trigger_mask] = side
         self.last_stair_trigger[trigger_mask, side] = episode_time[trigger_mask] + self.dt
+
         duration = max(float(getattr(self.cfg.control, "stair_ff_duration", 0.48)), 0.0)
         cooldown = max(float(getattr(self.cfg.control, "stair_ff_cooldown", 0.18)), 0.0)
         self.stair_ff_cooldown_until[trigger_mask, side] = (
             episode_time[trigger_mask] + duration + cooldown
         )
+
         if is_followup:
             self.stair_followup_used[trigger_mask, side] = True
 
@@ -251,25 +267,80 @@ class D1HMoEDisc(D1HMoEBase):
         self._trigger_stair_lift(left_first, 0, episode_time)
         self._trigger_stair_lift(right_first, 1, episode_time)
 
-        # Follow-up is phase based rather than impact based.  It waits until the
-        # first leg is in the middle-late part of the rescue motion, then starts
-        # the other leg if the robot is still upright and high enough.
-        left_followup = (
+        # Follow-up uses a looser posture gate than the first impact trigger.
+        # When one leg has already climbed, the trailing leg may be stuck and the
+        # body posture is usually worse than at the first contact.  Reusing the
+        # strict first-trigger gate can suppress the exact rescue we need.
+        followup_min_upright = float(
+            getattr(
+                self.cfg.control,
+                "stair_ff_followup_min_upright",
+                getattr(self.cfg.control, "stair_ff_min_upright", 0.62),
+            )
+        )
+        followup_min_base_height = float(
+            getattr(
+                self.cfg.control,
+                "stair_ff_followup_min_base_height",
+                getattr(self.cfg.control, "stair_ff_min_base_height", 0.30),
+            )
+        )
+        followup_upright_ok = upright_score > followup_min_upright
+        followup_height_ok = base_height > followup_min_base_height
+        followup_posture_ok = forward_cmd & followup_upright_ok & followup_height_ok
+
+        # Normal phase follow-up: after the first leg reaches the middle-late
+        # rescue phase, start the other leg even without a second hard impact.
+        left_phase_followup = (
             self.stair_lift_active[:, 1]
             & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
             & ~self.stair_followup_used[:, 0]
             & (self.stair_lift_phase[:, 1] >= followup_phase)
-            & posture_ok
+            & followup_posture_ok
         )
-        right_followup = (
+        right_phase_followup = (
             self.stair_lift_active[:, 0]
             & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
             & ~self.stair_followup_used[:, 1]
             & (self.stair_lift_phase[:, 0] >= followup_phase)
-            & posture_ok
+            & followup_posture_ok
         )
+
+        # Trailing-leg jam rescue: if the non-lifting leg hits the stair edge
+        # and the base is slow, trigger it earlier than the nominal follow-up
+        # phase.  This directly targets the failure mode where one leg climbs
+        # while the other leg remains blocked and stalls the whole robot.
+        opposite_jam_force = float(getattr(self.cfg.control, "stair_ff_opposite_jam_force", 35.0))
+        opposite_jam_abs_speed = float(getattr(self.cfg.control, "stair_ff_opposite_jam_abs_speed", 0.16))
+        opposite_jam_speed_ratio = float(getattr(self.cfg.control, "stair_ff_opposite_jam_speed_ratio", 0.70))
+
+        opposite_contact = smooth_contact > opposite_jam_force
+        trailing_slow = (base_vx < opposite_jam_abs_speed) | (base_vx < cmd_x * opposite_jam_speed_ratio)
+
+        left_trailing_jam = (
+            self.stair_lift_active[:, 1]
+            & ~self.stair_lift_active[:, 0]
+            & (self.last_stair_trigger[:, 1] > 0.0)
+            & ~self.stair_followup_used[:, 0]
+            & opposite_contact[:, 0]
+            & trailing_slow
+            & followup_posture_ok
+        )
+        right_trailing_jam = (
+            self.stair_lift_active[:, 0]
+            & ~self.stair_lift_active[:, 1]
+            & (self.last_stair_trigger[:, 0] > 0.0)
+            & ~self.stair_followup_used[:, 1]
+            & opposite_contact[:, 1]
+            & trailing_slow
+            & followup_posture_ok
+        )
+
+        left_followup = left_phase_followup | left_trailing_jam
+        right_followup = right_phase_followup | right_trailing_jam
+
         self._trigger_stair_lift(left_followup, 0, episode_time, is_followup=True)
         self._trigger_stair_lift(right_followup, 1, episode_time, is_followup=True)
 
@@ -946,7 +1017,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class terrain(D1HMoEBaseCfg.terrain):
         # Stage 1: only clean up-stairs, starting at the easiest row.
         curriculum = True
-        max_init_terrain_level = 0
+        max_init_terrain_level = 5
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
 
@@ -957,7 +1028,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
         num_rows = 15
-        step_height = [0.028, 0.178]
+        step_height = [0.035, 0.185]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
@@ -989,8 +1060,18 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # of its rescue trajectory.  This is less aggressive than 0.50, but much
         # less likely to miss the second leg than the old 0.42 s impact-gated rule.
         stair_ff_duration = 0.48
-        stair_ff_followup_phase = 0.64
+        stair_ff_followup_phase = 0.52
+        stair_ff_followup_phase_init = 0.12
         stair_ff_cooldown = 0.20
+
+        # Follow-up rescue uses looser gates than the first trigger.  This helps
+        # the trailing leg lift when the leading leg has already climbed and the
+        # body posture has degraded slightly.
+        stair_ff_followup_min_upright = 0.45
+        stair_ff_followup_min_base_height = 0.26
+        stair_ff_opposite_jam_force = 15.0
+        stair_ff_opposite_jam_abs_speed = 0.2
+        stair_ff_opposite_jam_speed_ratio = 0.8
 
         # B-scheme IK feedforward strength and shaping.
         stair_ff_k = 0.55
@@ -1008,17 +1089,17 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_x0 = 0.05
         stair_ff_x1 = 0.35
         stair_ff_z_hip = 0.45
-        stair_ff_h_margin = 0.05
+        stair_ff_h_margin = 0.08
 
         # Blind trigger: sustained contact plus mild blocked-motion evidence.
         # These are intentionally not too strict, because the robot has no exteroceptive
         # perception and must react from proprioceptive/contact information.
-        stair_ff_contact_threshold = 55.0
+        stair_ff_contact_threshold = 44.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
         stair_ff_contact_stable_frames = 3
         stair_ff_min_cmd_x = 0.12
-        stair_ff_jam_speed_ratio = 0.55
+        stair_ff_jam_speed_ratio = 0.85
         stair_ff_jam_abs_speed = 0.12
         stair_ff_min_upright = 0.62
         stair_ff_min_base_height = 0.30
@@ -1102,22 +1183,22 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             tracking_lin_vel = 0.0
             # Keep only a weak forward guardrail. Y/yaw rewards were mostly free
             # bonuses with zero commands, so they hide the real stair signal.
-            tracking_lin_vel_x = 10.0
+            tracking_lin_vel_x = 12.0
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 0.0
-            heading = -2.0
+            heading = -5.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
-            orientation = -18.0
+            orientation = -25.0
             upward = 0.0
-            ang_vel_xy = -0.25
+            ang_vel_xy = -0.35
             base_height = -10.0
             lin_vel_z = -0.5
 
             # Failure/contact penalties.
             termination = -400.0
-            collision = -16.0
-            collision_hard = -125.0
+            collision = -12.0
+            collision_hard = -100.0
             collision_head = 0.0
 
             # Remove tiny regularizers that only add noise to the scalar reward.
@@ -1220,3 +1301,5 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         max_iterations = 20000
         num_steps_per_env = 32
         save_interval = 200
+        video_interval = 100
+

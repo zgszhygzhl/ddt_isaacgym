@@ -67,7 +67,7 @@ class ResidualPolicyRunner(OnConstraintPolicyRunner):
         self.tot_time = 0
 
         self.record_video = self.cfg.get("record_video", False) and self.log_dir is not None
-        self.video_interval = int(self.cfg.get("video_interval", 500))
+        self.video_interval = int(self.cfg.get("video_interval", 300))
         self.video_duration = float(self.cfg.get("video_duration", 8.0))
         self.video_fps = int(self.cfg.get("video_fps", 30))
         self.video_num_envs = int(self.cfg.get("video_num_envs", 16))
