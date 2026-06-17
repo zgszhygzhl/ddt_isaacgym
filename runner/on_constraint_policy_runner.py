@@ -5,6 +5,10 @@ import statistics
 import warnings
 
 import numpy as np
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
@@ -306,6 +310,115 @@ class OnConstraintPolicyRunner:
         self.video_steps_left = max(1, int(np.ceil(self.video_duration / self.env.dt)))
         self.video_step_count = 0
 
+    def _get_train_video_debug_state(self):
+        if not hasattr(self.env, "get_video_debug_state"):
+            return None
+        try:
+            return self.env.get_video_debug_state(self.video_env_ids)
+        except Exception as error:
+            warnings.warn(f"Failed to get train-video debug state: {error}")
+            return None
+
+    def _get_debug_value(self, debug_state, key, index, default=None):
+        if debug_state is None:
+            return default
+        values = debug_state.get(key)
+        if values is None or index >= len(values):
+            return default
+        return values[index]
+
+    def _draw_train_video_overlay(self, frame, tile_index, env_id, debug_state):
+        if debug_state is None:
+            return frame
+
+        ff_active = bool(self._get_debug_value(debug_state, "ff_active", tile_index, False))
+        left_active = bool(self._get_debug_value(debug_state, "left_active", tile_index, False))
+        right_active = bool(self._get_debug_value(debug_state, "right_active", tile_index, False))
+        first_pulse = bool(self._get_debug_value(debug_state, "first_pulse", tile_index, False))
+        follow_pulse = bool(self._get_debug_value(debug_state, "follow_pulse", tile_index, False))
+        first_leg = int(self._get_debug_value(debug_state, "first_leg", tile_index, 0) or 0)
+        terrain_level = int(self._get_debug_value(debug_state, "terrain_level", tile_index, -1) or -1)
+        left_phase = float(self._get_debug_value(debug_state, "left_phase", tile_index, 0.0) or 0.0)
+        right_phase = float(self._get_debug_value(debug_state, "right_phase", tile_index, 0.0) or 0.0)
+
+        if not (ff_active or first_pulse or follow_pulse or first_leg > 0):
+            return frame
+
+        img = frame.copy()
+        h, w = img.shape[:2]
+
+        # RGB colors because Isaac Gym frame is RGB here.
+        color_active = (0, 220, 0)
+        color_first = (255, 60, 60)
+        color_follow = (255, 210, 0)
+        color = color_active
+        if follow_pulse:
+            color = color_follow
+        if first_pulse:
+            color = color_first
+
+        # Always draw a visible border.  It remains useful even without cv2.
+        border = 4
+        img[:border, :, :] = color
+        img[-border:, :, :] = color
+        img[:, :border, :] = color
+        img[:, -border:, :] = color
+
+        lines = []
+        if first_pulse:
+            lines.append("TRIG1")
+        if follow_pulse:
+            lines.append("TRIG2")
+
+        if ff_active:
+            if left_active and right_active:
+                lines.append(f"FF:LR  L:{left_phase:.2f} R:{right_phase:.2f}")
+            elif left_active:
+                lines.append(f"FF:L   p:{left_phase:.2f}")
+            elif right_active:
+                lines.append(f"FF:R   p:{right_phase:.2f}")
+            else:
+                lines.append("FF:ON")
+
+        if first_leg == 1:
+            lines.append("FIRST:L")
+        elif first_leg == 2:
+            lines.append("FIRST:R")
+
+        if terrain_level >= 0:
+            lines.append(f"ENV:{env_id}  LVL:{terrain_level}")
+
+        # Semi-transparent black panel.
+        panel_height = min(h - 16, 20 + 20 * len(lines))
+        if panel_height > 0:
+            overlay = img.copy()
+            overlay[8:8 + panel_height, 8:min(w - 8, 250), :] = (0, 0, 0)
+            img = np.asarray(0.55 * img + 0.45 * overlay, dtype=np.uint8)
+
+        if cv2 is not None:
+            y = 28
+            for line in lines:
+                cv2.putText(
+                    img,
+                    line,
+                    (14, y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52,
+                    color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                y += 20
+        else:
+            # Fallback without cv2: draw small colored bars so trigger/active
+            # states are still visible and training never crashes on missing cv2.
+            y0 = 14
+            for _ in lines:
+                img[y0:y0 + 8, 14:min(w - 14, 110), :] = color
+                y0 += 18
+
+        return img
+
     def _capture_train_video_frame(self):
         if self.video_writer is None or not self.video_cam_handles:
             return
@@ -317,7 +430,8 @@ class OnConstraintPolicyRunner:
         if self.video_step_count % self.video_record_every == 0:
             tiles = []
             total_tiles = self.video_tile_rows * self.video_tile_cols
-            for env_id, cam_handle in zip(self.video_env_ids, self.video_cam_handles):
+            debug_state = self._get_train_video_debug_state()
+            for tile_index, (env_id, cam_handle) in enumerate(zip(self.video_env_ids, self.video_cam_handles)):
                 image = self.env.gym.get_camera_image(
                     self.env.sim,
                     self.env.envs[env_id],
@@ -327,6 +441,7 @@ class OnConstraintPolicyRunner:
                 frame = np.asarray(image, dtype=np.uint8).reshape(
                     (self.video_tile_height, self.video_tile_width, 4)
                 )[:, :, :3]
+                frame = self._draw_train_video_overlay(frame, tile_index, env_id, debug_state)
                 tiles.append(frame)
 
             while len(tiles) < total_tiles:

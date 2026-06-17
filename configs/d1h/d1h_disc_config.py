@@ -41,6 +41,10 @@ class D1HMoEDisc(D1HMoEBase):
             self.extras["episode"]["terrain_promote_rate"] = torch.mean(
                 self._terrain_move_up.float()
             )
+            if hasattr(self, "_terrain_move_down"):
+                self.extras["episode"]["terrain_move_down_rate"] = torch.mean(
+                    self._terrain_move_down.float()
+                )
         if ff_contact_hit_ratio is not None:
             self.extras["episode"]["stair_ff_contact_hit_ratio"] = ff_contact_hit_ratio
             self.extras["episode"]["stair_ff_active_ratio"] = ff_active_ratio
@@ -86,6 +90,69 @@ class D1HMoEDisc(D1HMoEBase):
         super()._post_physics_step_callback()
         self._update_step_contact_state()
         self._update_step_imbalance_state()
+        if hasattr(self, "stair_ff_vis_first_pulse"):
+            self.stair_ff_vis_first_pulse = torch.clamp(
+                self.stair_ff_vis_first_pulse - self.dt,
+                min=0.0,
+            )
+        if hasattr(self, "stair_ff_vis_follow_pulse"):
+            self.stair_ff_vis_follow_pulse = torch.clamp(
+                self.stair_ff_vis_follow_pulse - self.dt,
+                min=0.0,
+            )
+
+
+
+    def get_video_debug_state(self, env_ids):
+        """Return lightweight stair feedforward state for train-video overlays.
+
+        The runner calls this with `video_env_ids`.  Values are converted to CPU
+        lists so the video code can draw them without touching CUDA tensors.
+        """
+        env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids_t.numel() == 0:
+            return {}
+
+        zeros_bool = torch.zeros(env_ids_t.numel(), dtype=torch.bool, device=self.device)
+        zeros_long = torch.zeros(env_ids_t.numel(), dtype=torch.long, device=self.device)
+        zeros_float = torch.zeros(env_ids_t.numel(), dtype=torch.float, device=self.device)
+
+        if hasattr(self, "stair_lift_active"):
+            left_active = self.stair_lift_active[env_ids_t, 0]
+            right_active = self.stair_lift_active[env_ids_t, 1]
+            ff_active = self.stair_lift_active[env_ids_t].any(dim=1)
+        else:
+            left_active = right_active = ff_active = zeros_bool
+
+        if hasattr(self, "stair_lift_phase"):
+            left_phase = self.stair_lift_phase[env_ids_t, 0]
+            right_phase = self.stair_lift_phase[env_ids_t, 1]
+        else:
+            left_phase = right_phase = zeros_float
+
+        if hasattr(self, "stair_ff_vis_first_pulse"):
+            first_pulse = self.stair_ff_vis_first_pulse[env_ids_t] > 0.0
+        else:
+            first_pulse = zeros_bool
+        if hasattr(self, "stair_ff_vis_follow_pulse"):
+            follow_pulse = self.stair_ff_vis_follow_pulse[env_ids_t] > 0.0
+        else:
+            follow_pulse = zeros_bool
+
+        first_leg = self.stair_first_leg[env_ids_t] if hasattr(self, "stair_first_leg") else zeros_long
+        terrain_level = self.terrain_levels[env_ids_t] if hasattr(self, "terrain_levels") else zeros_long
+
+        return {
+            "ff_active": ff_active.detach().cpu().tolist(),
+            "left_active": left_active.detach().cpu().tolist(),
+            "right_active": right_active.detach().cpu().tolist(),
+            "left_phase": left_phase.detach().cpu().tolist(),
+            "right_phase": right_phase.detach().cpu().tolist(),
+            "first_pulse": first_pulse.detach().cpu().tolist(),
+            "follow_pulse": follow_pulse.detach().cpu().tolist(),
+            "first_leg": first_leg.detach().cpu().tolist(),
+            "terrain_level": terrain_level.detach().cpu().tolist(),
+        }
 
     def _get_stair_ff_contact_forces(self):
         if hasattr(self, "force_sensor_tensor") and torch.is_tensor(self.force_sensor_tensor):
@@ -183,8 +250,15 @@ class D1HMoEDisc(D1HMoEBase):
 
         duration = max(float(getattr(self.cfg.control, "stair_ff_duration", 0.48)), 0.0)
         cooldown = max(float(getattr(self.cfg.control, "stair_ff_cooldown", 0.18)), 0.0)
+
+        extend_enabled = bool(getattr(self.cfg.control, "stair_ff_extend_enabled", True))
+        extend_ratio = float(getattr(self.cfg.control, "stair_ff_extend_ratio", 0.50))
+        extend_ratio = max(extend_ratio, 0.0)
+
+        phase_end = 1.0 + extend_ratio if extend_enabled else 1.0
+
         self.stair_ff_cooldown_until[trigger_mask, side] = (
-            episode_time[trigger_mask] + duration + cooldown
+            episode_time[trigger_mask] + duration * phase_end + cooldown
         )
 
         if is_followup:
@@ -315,6 +389,9 @@ class D1HMoEDisc(D1HMoEBase):
         opposite_jam_force = float(getattr(self.cfg.control, "stair_ff_opposite_jam_force", 35.0))
         opposite_jam_abs_speed = float(getattr(self.cfg.control, "stair_ff_opposite_jam_abs_speed", 0.16))
         opposite_jam_speed_ratio = float(getattr(self.cfg.control, "stair_ff_opposite_jam_speed_ratio", 0.70))
+        trailing_jam_min_first_phase = float(
+            getattr(self.cfg.control, "stair_ff_trailing_jam_min_first_phase", 0.70)
+        )
 
         opposite_contact = smooth_contact > opposite_jam_force
         trailing_slow = (base_vx < opposite_jam_abs_speed) | (base_vx < cmd_x * opposite_jam_speed_ratio)
@@ -324,6 +401,7 @@ class D1HMoEDisc(D1HMoEBase):
             & ~self.stair_lift_active[:, 0]
             & (self.last_stair_trigger[:, 1] > 0.0)
             & ~self.stair_followup_used[:, 0]
+            & (self.stair_lift_phase[:, 1] >= trailing_jam_min_first_phase)
             & opposite_contact[:, 0]
             & trailing_slow
             & followup_posture_ok
@@ -333,6 +411,7 @@ class D1HMoEDisc(D1HMoEBase):
             & ~self.stair_lift_active[:, 1]
             & (self.last_stair_trigger[:, 0] > 0.0)
             & ~self.stair_followup_used[:, 1]
+            & (self.stair_lift_phase[:, 0] >= trailing_jam_min_first_phase)
             & opposite_contact[:, 1]
             & trailing_slow
             & followup_posture_ok
@@ -349,16 +428,38 @@ class D1HMoEDisc(D1HMoEBase):
             self.stair_lift_phase + self.dt / duration,
             self.stair_lift_phase,
         )
-        done = self.stair_lift_phase >= 1.0
+
+        extend_enabled = bool(getattr(self.cfg.control, "stair_ff_extend_enabled", True))
+        extend_ratio = float(getattr(self.cfg.control, "stair_ff_extend_ratio", 0.50))
+        extend_ratio = max(extend_ratio, 0.0)
+
+        phase_end = 1.0 + extend_ratio if extend_enabled else 1.0
+
+        done = self.stair_lift_phase >= phase_end
         self.stair_lift_active = self.stair_lift_active & ~done
-        self.stair_lift_phase = torch.where(done, torch.zeros_like(self.stair_lift_phase), self.stair_lift_phase)
+        self.stair_lift_phase = torch.where(
+            done,
+            torch.zeros_like(self.stair_lift_phase),
+            self.stair_lift_phase,
+        )
 
         no_active_after_update = ~self.stair_lift_active.any(dim=1)
         self.last_stair_trigger[no_active_after_update] = 0.0
         self.stair_followup_used[no_active_after_update] = False
 
+        # 这里只是 video/debug 用的信号，不直接参与 IK 前馈。
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
+
+        if extend_enabled and extend_ratio > 1e-6:
+            ext_u = torch.clamp((self.stair_lift_phase - 1.0) / extend_ratio, 0.0, 1.0)
+            release_gate = 1.0 - (ext_u * ext_u * (3.0 - 2.0 * ext_u))
+            signal = torch.where(
+                self.stair_lift_phase > 1.0,
+                release_gate,
+                signal,
+            )
+
         self.last_stair_ff_signal = signal * self.stair_lift_active.float()
         self.stair_ff_active_sum += self.stair_lift_active.any(dim=1).float()
 
@@ -447,8 +548,55 @@ class D1HMoEDisc(D1HMoEBase):
         return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
     def _update_terrain_curriculum(self, env_ids):
-        """Use the base task terrain-curriculum rule without expert-specific overrides."""
-        return super()._update_terrain_curriculum(env_ids)
+        """Stair-specific terrain curriculum based on forward progress.
+
+        Rule:
+            - move up if the robot travels far enough;
+            - move down if the robot barely moves forward;
+            - otherwise keep the current terrain level.
+
+        This prevents the diagnostic 'only move up' behavior from pushing the
+        robot into high stair levels before the skill is stable.
+        """
+        if not self.init_done:
+            return
+
+        if len(env_ids) == 0:
+            return
+
+        forward_progress = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
+
+        move_up_distance = float(
+            getattr(self.cfg.terrain, "curriculum_move_up_distance", 2.2)
+        )
+        move_down_distance = float(
+            getattr(self.cfg.terrain, "curriculum_move_down_distance", 0.8)
+        )
+
+        move_up = forward_progress > move_up_distance
+
+        # Downgrade only when the robot clearly fails to move through the stair.
+        # The middle band [move_down_distance, move_up_distance] keeps the level unchanged.
+        move_down = forward_progress < move_down_distance
+
+        # Avoid contradictory update if thresholds are changed badly.
+        move_down = move_down & ~move_up
+
+        self.terrain_levels[env_ids] += move_up.long() - move_down.long()
+        self.terrain_levels[env_ids] = torch.clip(
+            self.terrain_levels[env_ids],
+            min=0,
+            max=self.max_terrain_level - 1,
+        )
+
+        self.env_origins[env_ids] = self.terrain_origins[
+            self.terrain_levels[env_ids],
+            self.terrain_types[env_ids],
+        ]
+
+        self._terrain_forward_progress = forward_progress.detach()
+        self._terrain_move_up = move_up.detach()
+        self._terrain_move_down = move_down.detach()
 
     def _get_step_lift_context(self):
         zeros = torch.zeros(self.num_envs, device=self.device)
@@ -1017,7 +1165,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class terrain(D1HMoEBaseCfg.terrain):
         # Stage 1: only clean up-stairs, starting at the easiest row.
         curriculum = True
-        max_init_terrain_level = 5
+        max_init_terrain_level = 2
         # Terrain order: [smooth slope, rough slope, stairs up, stairs down, discrete obstacles].
         terrain_proportions = [0.0, 0.0, 1.0, 0.0, 0.0]
 
@@ -1027,12 +1175,19 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
-        num_rows = 15
-        step_height = [0.035, 0.185]
+        num_rows = 13
+        step_height = [0.05, 0.18]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
-        # Terrain promotion/demotion criteria are intentionally inherited from D1HMoEBase.
+        
+        # Stair-specific curriculum distances.
+        # Move up only when the robot travels far enough.
+        # Move down when it almost fails to make forward progress.
+        curriculum_move_up_distance = 3.2
+        curriculum_move_down_distance = 1.4
+
+
 
     class domain_rand(D1HMoEBaseCfg.domain_rand):
         # Stair-up is a fine contact skill. Remove early noise sources that make
@@ -1059,47 +1214,66 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # the second leg starts after the first leg has finished roughly two thirds
         # of its rescue trajectory.  This is less aggressive than 0.50, but much
         # less likely to miss the second leg than the old 0.42 s impact-gated rule.
-        stair_ff_duration = 0.48
-        stair_ff_followup_phase = 0.52
-        stair_ff_followup_phase_init = 0.12
+        stair_ff_duration = 0.6
+        stair_ff_followup_phase = 0.7
+        stair_ff_followup_phase_init = 0.00
         stair_ff_cooldown = 0.20
+        stair_ff_extend_enabled = True
+        stair_ff_extend_ratio = 0.30
 
         # Follow-up rescue uses looser gates than the first trigger.  This helps
         # the trailing leg lift when the leading leg has already climbed and the
         # body posture has degraded slightly.
         stair_ff_followup_min_upright = 0.45
         stair_ff_followup_min_base_height = 0.26
-        stair_ff_opposite_jam_force = 15.0
-        stair_ff_opposite_jam_abs_speed = 0.2
-        stair_ff_opposite_jam_speed_ratio = 0.8
+        stair_ff_opposite_jam_force = 40.0
+        stair_ff_opposite_jam_abs_speed = 0.1
+        stair_ff_opposite_jam_speed_ratio = 0.3
+        stair_ff_trailing_jam_min_first_phase = 0.80
 
         # B-scheme IK feedforward strength and shaping.
-        stair_ff_k = 0.55
-        stair_ff_phase_start = 0.30
+        stair_ff_k = 1.0
+        stair_ff_phase_start = 0.20
         stair_ff_ramp_ratio = 0.06
         stair_ff_max_offset = 1.20
         stair_ff_final_max_offset = 0.65
 
-        # IK geometry.  z_hip=0.45 matches the default thigh/calf posture more
-        # closely than 0.40 in the MATLAB check.
+        # IK geometry.
         stair_ff_l1 = 0.25
         stair_ff_l2 = 0.25
         stair_ff_wheel_radius = 0.085
-        stair_ff_step_height = 0.15
-        stair_ff_x0 = 0.05
-        stair_ff_x1 = 0.35
+        stair_ff_step_height = 0.16
+        stair_ff_x0 = 0.0
+        stair_ff_x1 = 0.12
         stair_ff_z_hip = 0.45
-        stair_ff_h_margin = 0.08
+
+        # Rounded vertical-first Bezier stair trajectory.
+        # z_peak = step_height + wheel_radius + clear_margin.
+        # This replaces the old cycloid + h_margin trajectory.
+        stair_ff_traj_type = "bezier_vertical_first"
+        stair_ff_clear_margin = 0.04
+
+        # Bezier control ratios:
+        # P0 = start
+        # P1 = same x, high z: makes initial motion mostly upward
+        # P2 = near start x, peak z: early clearance
+        # P3 = forward x, peak z: high forward transfer
+        # P4 = end x, above landing: smooth downward landing
+        # P5 = end
+        stair_ff_bezier_p1_z_ratio = 0.70
+        stair_ff_bezier_p2_x_ratio = 0.05
+        stair_ff_bezier_p3_x_ratio = 0.65
+        stair_ff_bezier_p4_z_ratio = 0.25
 
         # Blind trigger: sustained contact plus mild blocked-motion evidence.
         # These are intentionally not too strict, because the robot has no exteroceptive
         # perception and must react from proprioceptive/contact information.
-        stair_ff_contact_threshold = 44.0
+        stair_ff_contact_threshold = 45.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
         stair_ff_contact_stable_frames = 3
         stair_ff_min_cmd_x = 0.12
-        stair_ff_jam_speed_ratio = 0.85
+        stair_ff_jam_speed_ratio = 0.75
         stair_ff_jam_abs_speed = 0.12
         stair_ff_min_upright = 0.62
         stair_ff_min_base_height = 0.30
@@ -1112,14 +1286,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
-        tracking_sigma = 0.07
+        tracking_sigma = 0.06
         distance_sigma = 0.08
         soft_dof_pos_limit = 0.98
         soft_dof_vel_limit = 0.98
         soft_torque_limit = 0.98
         base_height_target = 0.45
-        base_height_scale = 0.05
-        base_height_deadband = 0.01
+        base_height_scale = 0.04
+        base_height_deadband = 0.03
         stair_ff_tracking_sigma = 0.12
 
         # Front height scan window used only by the stair rewards.
@@ -1185,14 +1359,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # bonuses with zero commands, so they hide the real stair signal.
             tracking_lin_vel_x = 12.0
             tracking_lin_vel_y = 0.0
-            tracking_ang_vel = 0.0
-            heading = -5.0
+            tracking_ang_vel = 15.0
+            heading = -20.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -25.0
-            upward = 0.0
-            ang_vel_xy = -0.35
-            base_height = -10.0
+            upward = 3.5
+            ang_vel_xy = -0.4
+            base_height = -13.0
             lin_vel_z = -0.5
 
             # Failure/contact penalties.
@@ -1205,7 +1379,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             torques = 0.0
             powers = 0.0
             dof_acc = 0.0
-            action_rate = -0.02
+            action_rate = -0.15
             action_smoothness = 0.0
             dof_pos_limits = 0.0
             dof_vel_limits = 0.0
@@ -1301,5 +1475,13 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         max_iterations = 20000
         num_steps_per_env = 32
         save_interval = 200
+        record_video = True
         video_interval = 100
+        video_duration = 5.0
+        video_fps = 30
+        video_num_envs = 16
+        video_tile_rows = 4
+        video_tile_cols = 4
+        video_tile_width = 320
+        video_tile_height = 180
 
