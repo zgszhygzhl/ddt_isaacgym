@@ -1476,7 +1476,7 @@ class D1HMoEDiscCfgPPO(D1HMoEBaseCfgPPO):
         num_steps_per_env = 32
         save_interval = 200
         record_video = True
-        video_interval = 100
+        video_interval = 300
         video_duration = 5.0
         video_fps = 30
         video_num_envs = 16
