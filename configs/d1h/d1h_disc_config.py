@@ -238,9 +238,9 @@ class D1HMoEDisc(D1HMoEBase):
         good_contact_hit = float(getattr(self.cfg.control, "stair_ff_anneal_good_contact_hit_ratio", 0.12))
 
         fast_scale = float(getattr(self.cfg.control, "stair_ff_anneal_fast_speed", 1.5))
-        normal_scale = float(getattr(self.cfg.control, "stair_ff_anneal_normal_speed", 0.7))
-        slow_scale = float(getattr(self.cfg.control, "stair_ff_anneal_slow_speed", 0.15))
-        smoothing = float(getattr(self.cfg.control, "stair_ff_anneal_speed_smoothing", 0.2))
+        normal_scale = float(getattr(self.cfg.control, "stair_ff_anneal_normal_speed", 1.0))
+        slow_scale = float(getattr(self.cfg.control, "stair_ff_anneal_slow_speed", 0.35))
+        smoothing = float(getattr(self.cfg.control, "stair_ff_anneal_speed_smoothing", 0.3))
         smoothing = min(max(smoothing, 0.0), 1.0)
 
         good = ((progress_mean >= good_progress) | (promote_rate >= good_promote)) & (contact_hit >= good_contact_hit)
@@ -526,7 +526,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_trigger[no_active_after_update] = 0.0
         self.stair_followup_used[no_active_after_update] = False
 
-        # 闂傚倷绀侀幖顐λ囬锕€鐤炬繝濠傜墛閸嬶繝鏌嶉崫鍕櫣闂傚偆鍨堕弻锝夊箣閿濆棭妫勯梺娲诲幗椤ㄥ棝濡甸崟顔剧杸闁圭偓娼欏▍銈囩磼?video/debug 闂傚倸鍊烽悞锕€顪冮崹顕呯劷闁秆勵殔缁€澶愬箹缁顎嗛柡瀣閺岀喓鈧數顭堟禒褔鏌嶉悷鎵ч柡灞界Ч婵＄兘濡烽妷锔界槪濠电姷鏁搁崑娑樏洪銏犺摕闁靛鍎Σ鍫熶繆椤栨瑨顒熸繛鍫幘缁辨挻鎷呯拠鈩冪暥濡炪倧濡囬弫濠氱嵁閸℃稑绀嬫い鎾寸☉娴滅偓绻涢幋鐑嗕痪妞ゅ繐鎳庣欢鐐碘偓骞垮劚椤︿即鎮￠弴鐔虹闁糕剝顨堢粻浼存煃瑜滈崜鐔妓夐幘璺哄灊?IK 闂傚倸鍊风粈渚€骞夐敓鐘茬闁告縿鍎抽惌鎾舵喐閻楀牆绔鹃柍褜鍓欓幊姗€銆佸鈧慨鈧柣?
+        # Smooth bell-shaped IK activation for video/debug overlays and feedforward bookkeeping.
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
 
@@ -1288,8 +1288,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
-        num_rows = 8
-        step_height = [0.06, 0.13]
+        num_rows = 9
+        step_height = [0.05, 0.13]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
@@ -1406,7 +1406,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Feedforward execution anneals away while the full IK target remains as a teacher.
         stair_ff_anneal_enabled = True
         stair_ff_anneal_mode = "cosine"
-        stair_ff_anneal_start_iter = 1500
+        stair_ff_anneal_start_iter = 300
         stair_ff_anneal_iterations = 4500
         stair_ff_anneal_override_scale = None
         stair_ff_anneal_iter_offset = 0.0
@@ -1420,9 +1420,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_anneal_min_contact_hit_ratio = 0.05
         stair_ff_anneal_good_contact_hit_ratio = 0.12
         stair_ff_anneal_fast_speed = 1.5
-        stair_ff_anneal_normal_speed = 0.7
-        stair_ff_anneal_slow_speed = 0.15
-        stair_ff_anneal_speed_smoothing = 0.2
+        stair_ff_anneal_normal_speed = 1.0
+        stair_ff_anneal_slow_speed = 0.35
+        stair_ff_anneal_speed_smoothing = 0.3
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
