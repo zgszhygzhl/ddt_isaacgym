@@ -24,6 +24,10 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
         self.last_stair_ff_teacher_offsets = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.last_stair_ff_offsets = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        self.stair_ff_anneal_adaptive_iter = torch.zeros((), device=self.device)
+        self.stair_ff_anneal_last_train_iter = torch.zeros((), device=self.device)
+        self.stair_ff_anneal_speed_scale = torch.ones((), device=self.device)
+        self.stair_ff_anneal_initialized = False
 
     def reset_idx(self, env_ids):
         ff_contact_hit_ratio = None
@@ -49,6 +53,12 @@ class D1HMoEDisc(D1HMoEBase):
         if ff_contact_hit_ratio is not None:
             self.extras["episode"]["stair_ff_contact_hit_ratio"] = ff_contact_hit_ratio
             self.extras["episode"]["stair_ff_active_ratio"] = ff_active_ratio
+            self._update_stair_ff_adaptive_anneal(ff_contact_hit_ratio, ff_active_ratio)
+            self.extras["episode"]["stair_ff_anneal_scale"] = self._get_stair_ff_anneal_scale().detach()
+            if hasattr(self, "stair_ff_anneal_speed_scale"):
+                self.extras["episode"]["stair_ff_anneal_speed_scale"] = self.stair_ff_anneal_speed_scale.detach()
+            if hasattr(self, "stair_ff_anneal_adaptive_iter"):
+                self.extras["episode"]["stair_ff_anneal_adaptive_iter"] = self.stair_ff_anneal_adaptive_iter.detach()
 
         self.step_contact_timer[env_ids] = 0.0
         self.step_jam_time[env_ids] = 0.0
@@ -205,6 +215,43 @@ class D1HMoEDisc(D1HMoEBase):
         clip_actions = float(self.cfg.normalization.clip_actions)
         return torch.clamp(actions + equivalent_ff, -clip_actions, clip_actions)
 
+    def _update_stair_ff_adaptive_anneal(self, ff_contact_hit_ratio, ff_active_ratio):
+        if not getattr(self.cfg.control, "stair_ff_anneal_adaptive_enabled", False):
+            return
+        if ff_contact_hit_ratio is None:
+            return
+
+        progress = getattr(self, "_terrain_forward_progress", None)
+        if progress is None:
+            return
+
+        progress_mean = torch.mean(progress).detach()
+        promote_rate = torch.mean(getattr(self, "_terrain_move_up", torch.zeros_like(progress)).float()).detach()
+        move_down_rate = torch.mean(getattr(self, "_terrain_move_down", torch.zeros_like(progress)).float()).detach()
+        contact_hit = ff_contact_hit_ratio.detach()
+
+        good_progress = float(getattr(self.cfg.control, "stair_ff_anneal_good_progress", 2.5))
+        bad_progress = float(getattr(self.cfg.control, "stair_ff_anneal_bad_progress", 1.8))
+        good_promote = float(getattr(self.cfg.control, "stair_ff_anneal_good_promote_rate", 0.25))
+        bad_move_down = float(getattr(self.cfg.control, "stair_ff_anneal_bad_move_down_rate", 0.12))
+        min_contact_hit = float(getattr(self.cfg.control, "stair_ff_anneal_min_contact_hit_ratio", 0.05))
+        good_contact_hit = float(getattr(self.cfg.control, "stair_ff_anneal_good_contact_hit_ratio", 0.12))
+
+        fast_scale = float(getattr(self.cfg.control, "stair_ff_anneal_fast_speed", 1.5))
+        normal_scale = float(getattr(self.cfg.control, "stair_ff_anneal_normal_speed", 0.7))
+        slow_scale = float(getattr(self.cfg.control, "stair_ff_anneal_slow_speed", 0.15))
+        smoothing = float(getattr(self.cfg.control, "stair_ff_anneal_speed_smoothing", 0.2))
+        smoothing = min(max(smoothing, 0.0), 1.0)
+
+        good = ((progress_mean >= good_progress) | (promote_rate >= good_promote)) & (contact_hit >= good_contact_hit)
+        bad = (progress_mean <= bad_progress) | (move_down_rate >= bad_move_down) | (contact_hit <= min_contact_hit)
+
+        target_speed = torch.as_tensor(normal_scale, device=self.device)
+        target_speed = torch.where(good, torch.as_tensor(fast_scale, device=self.device), target_speed)
+        target_speed = torch.where(bad, torch.as_tensor(slow_scale, device=self.device), target_speed)
+        self.stair_ff_anneal_speed_scale = (
+            (1.0 - smoothing) * self.stair_ff_anneal_speed_scale + smoothing * target_speed
+        ).clamp(min=0.0, max=max(fast_scale, normal_scale, 1.0))
     def _get_stair_ff_anneal_scale(self):
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
             return torch.ones((), device=self.device)
@@ -214,10 +261,22 @@ class D1HMoEDisc(D1HMoEBase):
             return torch.as_tensor(float(override_scale), device=self.device).clamp(0.0, 1.0)
 
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
-        train_iter = torch.as_tensor(
+        local_train_iter = torch.as_tensor(
             float(getattr(self, "common_step_counter", 0)) / steps_per_iter,
             device=self.device,
         )
+        iter_offset = float(getattr(self.cfg.control, "stair_ff_anneal_iter_offset", 0.0))
+        if getattr(self.cfg.control, "stair_ff_anneal_adaptive_enabled", False):
+            if not getattr(self, "stair_ff_anneal_initialized", False):
+                self.stair_ff_anneal_adaptive_iter = torch.as_tensor(iter_offset, device=self.device)
+                self.stair_ff_anneal_last_train_iter = local_train_iter.detach()
+                self.stair_ff_anneal_initialized = True
+            delta_iter = torch.clamp(local_train_iter - self.stair_ff_anneal_last_train_iter, min=0.0, max=1.0)
+            self.stair_ff_anneal_adaptive_iter = self.stair_ff_anneal_adaptive_iter + delta_iter * self.stair_ff_anneal_speed_scale
+            self.stair_ff_anneal_last_train_iter = local_train_iter.detach()
+            train_iter = self.stair_ff_anneal_adaptive_iter
+        else:
+            train_iter = local_train_iter + iter_offset
         start_iter = float(getattr(self.cfg.control, "stair_ff_anneal_start_iter", 0.0))
         iterations = float(getattr(self.cfg.control, "stair_ff_anneal_iterations", 1.0))
         end_iter = float(getattr(self.cfg.control, "stair_ff_anneal_end_iter", start_iter + iterations))
@@ -467,7 +526,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_trigger[no_active_after_update] = 0.0
         self.stair_followup_used[no_active_after_update] = False
 
-        # 杩欓噷鍙槸 video/debug 鐢ㄧ殑淇″彿锛屼笉鐩存帴鍙備笌 IK 鍓嶉銆?
+        # 闂傚倷绀侀幖顐λ囬锕€鐤炬繝濠傜墛閸嬶繝鏌嶉崫鍕櫣闂傚偆鍨堕弻锝夊箣閿濆棭妫勯梺娲诲幗椤ㄥ棝濡甸崟顔剧杸闁圭偓娼欏▍銈囩磼?video/debug 闂傚倸鍊烽悞锕€顪冮崹顕呯劷闁秆勵殔缁€澶愬箹缁顎嗛柡瀣閺岀喓鈧數顭堟禒褔鏌嶉悷鎵ч柡灞界Ч婵＄兘濡烽妷锔界槪濠电姷鏁搁崑娑樏洪銏犺摕闁靛鍎Σ鍫熶繆椤栨瑨顒熸繛鍫幘缁辨挻鎷呯拠鈩冪暥濡炪倧濡囬弫濠氱嵁閸℃稑绀嬫い鎾寸☉娴滅偓绻涢幋鐑嗕痪妞ゅ繐鎳庣欢鐐碘偓骞垮劚椤︿即鎮￠弴鐔虹闁糕剝顨堢粻浼存煃瑜滈崜鐔妓夐幘璺哄灊?IK 闂傚倸鍊风粈渚€骞夐敓鐘茬闁告縿鍎抽惌鎾舵喐閻楀牆绔鹃柍褜鍓欓幊姗€銆佸鈧慨鈧柣?
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
 
@@ -1062,6 +1121,32 @@ class D1HMoEDisc(D1HMoEBase):
         jam_score = torch.clamp((self.step_jam_time - grace_time) / max(time_scale, 1e-6), 0.0, 1.0)
         return jam_score * self._get_stair_posture_gate()
 
+    def _reward_step_drive(self):
+        """Dense anti-camping reward for continuing to drive into the stair."""
+
+        context = self._get_step_lift_context()
+        if context is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        active, _, _, zeros = context
+        if not torch.any(active):
+            return zeros
+
+        min_speed = getattr(self.cfg.rewards, "step_drive_min_speed", 0.06)
+        cmd_x = torch.clamp(self.commands[:, 0], min=min_speed + 1e-3)
+        vel_score = torch.clamp(
+            (self.base_lin_vel[:, 0] - min_speed) / torch.clamp(cmd_x - min_speed, min=1e-3),
+            0.0,
+            1.0,
+        )
+
+        x_progress = self.root_states[:, 0] - self.env_origins[:, 0]
+        progress_target = getattr(self.cfg.rewards, "step_drive_progress_target", 1.6)
+        progress_score = torch.clamp(x_progress / max(progress_target, 1e-6), 0.0, 1.0)
+
+        reward = 0.7 * vel_score + 0.3 * progress_score
+        return reward * active.float() * self._get_stair_posture_gate()
+
     def _reward_step_progress(self):
         """Reward forward progress when a front step is detected."""
 
@@ -1160,7 +1245,7 @@ class D1HMoEDisc(D1HMoEBase):
         min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
         stall_score = torch.clamp((min_speed - self.base_lin_vel[:, 0]) / max(min_speed, 1e-6), 0.0, 1.0)
         stalled = self.base_lin_vel[:, 0] < min_speed
-        return (active & stalled).float() * self._get_stair_posture_gate()
+        return stall_score * (active & stalled).float() * self._get_stair_posture_gate()
 
     def _reward_opposite_base_vel(self):
         cmd_x = self.commands[:, 0]
@@ -1321,11 +1406,23 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Feedforward execution anneals away while the full IK target remains as a teacher.
         stair_ff_anneal_enabled = True
         stair_ff_anneal_mode = "cosine"
-        stair_ff_anneal_start_iter = 0
-        stair_ff_anneal_iterations = 4000
+        stair_ff_anneal_start_iter = 1500
+        stair_ff_anneal_iterations = 4500
         stair_ff_anneal_override_scale = None
+        stair_ff_anneal_iter_offset = 0.0
         stair_ff_anneal_final_scale = 0.0
         stair_ff_anneal_steps_per_iter = 32
+        stair_ff_anneal_adaptive_enabled = True
+        stair_ff_anneal_good_progress = 2.5
+        stair_ff_anneal_bad_progress = 1.8
+        stair_ff_anneal_good_promote_rate = 0.25
+        stair_ff_anneal_bad_move_down_rate = 0.12
+        stair_ff_anneal_min_contact_hit_ratio = 0.05
+        stair_ff_anneal_good_contact_hit_ratio = 0.12
+        stair_ff_anneal_fast_speed = 1.5
+        stair_ff_anneal_normal_speed = 0.7
+        stair_ff_anneal_slow_speed = 0.15
+        stair_ff_anneal_speed_smoothing = 0.2
 
     class rewards(D1HMoEBaseCfg.rewards):
         only_positive_rewards = False
@@ -1354,7 +1451,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_lift_min_height = 0.08
         step_lift_margin = 0.09
         step_lift_sigma = 0.07
-        step_stall_min_speed = 0.12
+        step_stall_min_speed = 0.14
+        step_drive_min_speed = 0.06
+        step_drive_progress_target = 1.6
         step_pre_lift_min_height = 0.08
         step_pre_lift_margin = 0.09
         step_pre_lift_sigma = 0.05
@@ -1456,10 +1555,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
             step_leg_imbalance = -10.0
-            step_progress = 15.0
+            step_drive = 10.0
+            step_progress = 24.0
             step_up = 60.0
             step_success = 100.0
-            step_stall = -12.0
+            step_stall = -24.0
             step_bump = -20.0
             opposite_base_vel = -48.0
 

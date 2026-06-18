@@ -60,17 +60,17 @@ python scripts/train_residual.py \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 6000 \
+  --max_iterations 8000 \
   --residual_alpha 0.5 \
   --residual_alpha_warmup_steps 1 \
   --residual_alpha_warmup_min 1.0 \
   --residual_delta_clip 0.55 \
   --residual_std_min 0.25 \
   --residual_std_max 0.75 \
-  --stair_ff_scale 1.0 \
   --resume \
-  --load_run Jun18_12-47-57_ \
-  --checkpoint 6000 \
+  --load_run Jun18_17-22-14_ \
+  --checkpoint 11000 \
+  --stair_ff_anneal_iter_offset 1400
 
 
   --load_run Jun16_22-39-06_ \
