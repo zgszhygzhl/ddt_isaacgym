@@ -60,7 +60,7 @@ python scripts/train_residual.py \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 6000 \
+  --max_iterations 10000 \
   --residual_alpha 0.5 \
   --residual_alpha_warmup_steps 1 \
   --residual_alpha_warmup_min 1.0 \

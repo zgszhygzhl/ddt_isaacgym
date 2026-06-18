@@ -662,8 +662,29 @@ class D1HMoEDisc(D1HMoEBase):
 
         move_up = forward_progress > move_up_distance
 
-        # Downgrade only when the robot clearly fails to move through the stair.
-        # The middle band [move_down_distance, move_up_distance] keeps the level unchanged.
+        height_ready = torch.ones_like(move_up, dtype=torch.bool)
+        height_context = self._get_stair_height_context()
+        if height_context is not None:
+            _, obstacle_height, climbed_height, _, _, _ = height_context
+            env_obstacle = obstacle_height[env_ids]
+            env_climbed = climbed_height[env_ids]
+            min_height = float(getattr(self.cfg.rewards, "step_success_min_height", 0.025))
+            height_scale = torch.clamp(torch.maximum(env_obstacle, env_climbed), min=min_height)
+            height_ratio = torch.clamp(env_climbed / height_scale, 0.0, 1.0)
+            min_height_ratio = float(getattr(self.cfg.terrain, "curriculum_move_up_min_height_ratio", 0.55))
+            min_base_height = float(getattr(self.cfg.terrain, "curriculum_move_up_min_base_height", 0.38))
+            base_height = self._get_base_heights()[env_ids]
+            height_ready = (height_ratio >= min_height_ratio) & (base_height >= min_base_height)
+
+        anneal_ready = True
+        if getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
+            max_ff_scale = float(getattr(self.cfg.terrain, "curriculum_move_up_max_ff_scale", 0.75))
+            anneal_ready = self._get_stair_ff_anneal_scale().detach().item() <= max_ff_scale
+
+        move_up = move_up & height_ready & anneal_ready
+
+        # Downgrade when the robot cannot make useful forward progress. The middle
+        # band [move_down_distance, move_up_distance] keeps the level unchanged.
         move_down = forward_progress < move_down_distance
 
         # Avoid contradictory update if thresholds are changed badly.
@@ -986,7 +1007,7 @@ class D1HMoEDisc(D1HMoEBase):
         clip_actions = float(self.cfg.normalization.clip_actions)
         teacher_action = torch.clamp(teacher_action, -clip_actions, clip_actions)
         if getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
-            missing_teacher_scale = 1.0 - float(self._get_stair_ff_anneal_scale())
+            missing_teacher_scale = 1.0 - self._get_stair_ff_anneal_scale().detach().item()
             min_target_scale = float(getattr(self.cfg.rewards, "stair_ff_tracking_min_action_target_scale", 0.15))
             missing_teacher_scale = max(missing_teacher_scale, min_target_scale)
         else:
@@ -1031,9 +1052,19 @@ class D1HMoEDisc(D1HMoEBase):
         joint_score = 1.0 / (1.0 + torch.square(mean_joint_error / joint_sigma))
         reward = action_weight * action_score + joint_weight * joint_score
 
+        progress_target = float(getattr(self.cfg.rewards, "stair_ff_tracking_progress_target", 2.0))
+        progress_floor = float(getattr(self.cfg.rewards, "stair_ff_tracking_progress_floor", 0.15))
+        x_progress = self.root_states[:, 0] - self.env_origins[:, 0]
+        progress_gate = progress_floor + (1.0 - progress_floor) * torch.clamp(
+            x_progress / max(progress_target, 1e-6),
+            0.0,
+            1.0,
+        )
+        drive_gate = 0.25 + 0.75 * self._get_step_forward_score()
+
         min_gate = float(getattr(self.cfg.rewards, "stair_ff_tracking_min_gate", 0.25))
         posture_gate = torch.clamp(self._get_stair_posture_gate(), min=min_gate, max=1.0)
-        return reward * active_env.float() * posture_gate
+        return reward * progress_gate * drive_gate * active_env.float() * posture_gate
 
     def _reward_step_lift(self):
         """Reward reaching a useful lift height while the front step is active."""
@@ -1286,9 +1317,14 @@ class D1HMoEDisc(D1HMoEBase):
             return zeros
 
         min_speed = getattr(self.cfg.rewards, "step_stall_min_speed", 0.08)
-        stall_score = torch.clamp((min_speed - self.base_lin_vel[:, 0]) / max(min_speed, 1e-6), 0.0, 1.0)
-        stalled = self.base_lin_vel[:, 0] < min_speed
-        return stall_score * (active & stalled).float() * self._get_stair_posture_gate()
+        speed_stall = torch.clamp((min_speed - self.base_lin_vel[:, 0]) / max(min_speed, 1e-6), 0.0, 1.0)
+        x_progress = self.root_states[:, 0] - self.env_origins[:, 0]
+        progress_target = float(getattr(self.cfg.rewards, "step_stall_progress_target", 2.4))
+        progress_stall = 1.0 - torch.clamp(x_progress / max(progress_target, 1e-6), 0.0, 1.0)
+        stall_score = torch.maximum(speed_stall, progress_stall)
+        stalled = (self.base_lin_vel[:, 0] < min_speed) | (progress_stall > 0.35)
+        posture_gate = torch.clamp(self._get_stair_posture_gate(), min=0.25, max=1.0)
+        return stall_score * (active & stalled).float() * posture_gate
 
     def _reward_opposite_base_vel(self):
         cmd_x = self.commands[:, 0]
@@ -1340,8 +1376,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Stair-specific curriculum distances.
         # Move up only when the robot travels far enough.
         # Move down when it almost fails to make forward progress.
-        curriculum_move_up_distance = 3.2
-        curriculum_move_down_distance = 1.4
+        curriculum_move_up_distance = 4.0
+        curriculum_move_down_distance = 1.8
+        curriculum_move_up_max_ff_scale = 0.75
+        curriculum_move_up_min_height_ratio = 0.55
+        curriculum_move_up_min_base_height = 0.38
 
 
 
@@ -1484,6 +1523,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_tracking_joint_weight = 0.25
         stair_ff_tracking_min_gate = 0.25
         stair_ff_tracking_min_action_target_scale = 0.15
+        stair_ff_tracking_progress_target = 2.0
+        stair_ff_tracking_progress_floor = 0.15
 
         # Front height scan window used only by the stair rewards.
         step_clearance_front_x_min = 0.20
@@ -1503,6 +1544,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_stall_min_speed = 0.14
         step_drive_min_speed = 0.06
         step_drive_progress_target = 1.6
+        step_stall_progress_target = 2.4
         step_pre_lift_min_height = 0.08
         step_pre_lift_margin = 0.09
         step_pre_lift_sigma = 0.05
@@ -1608,7 +1650,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_progress = 24.0
             step_up = 60.0
             step_success = 100.0
-            step_stall = -24.0
+            step_stall = -40.0
             step_bump = -20.0
             opposite_base_vel = -48.0
 
