@@ -960,16 +960,15 @@ class D1HMoEDisc(D1HMoEBase):
         return reward * active.float() * lifting.float() * self._get_stair_posture_gate()
 
     def _reward_stair_ff_tracking(self):
-        """Teach the policy/body to cooperate with the active IK feedforward target."""
+        """Strongly distill the full stair IK teacher into policy action and body state."""
         if (
             not hasattr(self, "last_stair_ff_teacher_offsets")
             or not hasattr(self, "stair_lift_active")
+            or not hasattr(self, "actions")
             or not torch.any(self.stair_lift_active)
         ):
             return torch.zeros(self.num_envs, device=self.device)
 
-        sq_error = torch.zeros(self.num_envs, device=self.device)
-        active_count = torch.zeros(self.num_envs, device=self.device)
         tracked_joint_names = [
             ("FL_thigh_joint", 0),
             ("FL_calf_joint", 0),
@@ -977,20 +976,64 @@ class D1HMoEDisc(D1HMoEBase):
             ("FR_calf_joint", 1),
         ]
 
+        action_scale = torch.full_like(self.actions, float(self.cfg.control.action_scale))
+        action_scale[:, self.hip_joint_indices] *= self.cfg.control.hip_scale_reduction
+        teacher_action = torch.where(
+            torch.abs(action_scale) > 1e-6,
+            self.last_stair_ff_teacher_offsets / action_scale,
+            torch.zeros_like(self.last_stair_ff_teacher_offsets),
+        )
+        clip_actions = float(self.cfg.normalization.clip_actions)
+        teacher_action = torch.clamp(teacher_action, -clip_actions, clip_actions)
+        if getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
+            missing_teacher_scale = 1.0 - float(self._get_stair_ff_anneal_scale())
+            min_target_scale = float(getattr(self.cfg.rewards, "stair_ff_tracking_min_action_target_scale", 0.15))
+            missing_teacher_scale = max(missing_teacher_scale, min_target_scale)
+        else:
+            missing_teacher_scale = 1.0
+        target_action_delta = missing_teacher_scale * teacher_action
+
+        action_source = getattr(self, "last_residual_delta", self.actions)
+        action_sq_error = torch.zeros(self.num_envs, device=self.device)
+        joint_sq_error = torch.zeros(self.num_envs, device=self.device)
+        active_count = torch.zeros(self.num_envs, device=self.device)
+
         for joint_name, side in tracked_joint_names:
             if joint_name not in self.dof_names:
                 continue
             joint_idx = self.dof_names.index(joint_name)
-            active = self.stair_lift_active[:, side]
-            target = self.default_dof_pos[:, joint_idx] + self.last_stair_ff_teacher_offsets[:, joint_idx]
-            sq_error += torch.square(self.dof_pos[:, joint_idx] - target) * active.float()
-            active_count += active.float()
+            active = self.stair_lift_active[:, side].float()
+            target_joint_pos = self.default_dof_pos[:, joint_idx] + self.last_stair_ff_teacher_offsets[:, joint_idx]
+            joint_sq_error += torch.square(self.dof_pos[:, joint_idx] - target_joint_pos) * active
+            action_sq_error += torch.square(action_source[:, joint_idx] - target_action_delta[:, joint_idx]) * active
+            active_count += active
 
         active_env = active_count > 0.0
-        mean_sq_error = sq_error / torch.clamp(active_count, min=1.0)
-        sigma = max(float(getattr(self.cfg.rewards, "stair_ff_tracking_sigma", 0.12)), 1e-6)
-        reward = torch.exp(-mean_sq_error / (sigma * sigma)) * active_env.float()
-        return reward * self._get_stair_posture_gate()
+        active_count_safe = torch.clamp(active_count, min=1.0)
+        mean_joint_error = torch.sqrt(joint_sq_error / active_count_safe)
+        mean_action_error = torch.sqrt(action_sq_error / active_count_safe)
+
+        joint_sigma = max(
+            float(
+                getattr(
+                    self.cfg.rewards,
+                    "stair_ff_tracking_joint_sigma",
+                    getattr(self.cfg.rewards, "stair_ff_tracking_sigma", 0.35),
+                )
+            ),
+            1e-6,
+        )
+        action_sigma = max(float(getattr(self.cfg.rewards, "stair_ff_tracking_action_sigma", 0.45)), 1e-6)
+        action_weight = float(getattr(self.cfg.rewards, "stair_ff_tracking_action_weight", 0.75))
+        joint_weight = float(getattr(self.cfg.rewards, "stair_ff_tracking_joint_weight", 0.25))
+
+        action_score = 1.0 / (1.0 + torch.square(mean_action_error / action_sigma))
+        joint_score = 1.0 / (1.0 + torch.square(mean_joint_error / joint_sigma))
+        reward = action_weight * action_score + joint_weight * joint_score
+
+        min_gate = float(getattr(self.cfg.rewards, "stair_ff_tracking_min_gate", 0.25))
+        posture_gate = torch.clamp(self._get_stair_posture_gate(), min=min_gate, max=1.0)
+        return reward * active_env.float() * posture_gate
 
     def _reward_step_lift(self):
         """Reward reaching a useful lift height while the front step is active."""
@@ -1288,8 +1331,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
-        num_rows = 9
-        step_height = [0.05, 0.13]
+        num_rows = 10
+        step_height = [0.05, 0.17]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
@@ -1434,7 +1477,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         base_height_target = 0.45
         base_height_scale = 0.04
         base_height_deadband = 0.03
-        stair_ff_tracking_sigma = 0.10
+        stair_ff_tracking_sigma = 0.35
+        stair_ff_tracking_joint_sigma = 0.35
+        stair_ff_tracking_action_sigma = 0.45
+        stair_ff_tracking_action_weight = 0.75
+        stair_ff_tracking_joint_weight = 0.25
+        stair_ff_tracking_min_gate = 0.25
+        stair_ff_tracking_min_action_target_scale = 0.15
 
         # Front height scan window used only by the stair rewards.
         step_clearance_front_x_min = 0.20
@@ -1550,7 +1599,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 1.5
-            stair_ff_tracking = 4.0
+            stair_ff_tracking = 40.0
             step_lift = 4.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0

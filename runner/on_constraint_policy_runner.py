@@ -533,6 +533,8 @@ class OnConstraintPolicyRunner:
                 for i in range(self.num_steps_per_env):
                    
                     actions = self.alg.act(obs, critic_obs, infos)
+                    if hasattr(self.alg.actor_critic, "last_delta"):
+                        self.env.last_residual_delta = self.alg.actor_critic.last_delta.detach()
                     obs, privileged_obs, rewards,costs,dones, infos = self.env.step(actions)  # obs has changed to next_obs !! if done obs has been reset
                     self._capture_train_video_frame()
                     critic_obs = privileged_obs if privileged_obs is not None else obs
