@@ -1175,8 +1175,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
-        num_rows = 13
-        step_height = [0.05, 0.18]
+        num_rows = 5
+        step_height = [0.07, 0.09]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
@@ -1242,7 +1242,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_l1 = 0.25
         stair_ff_l2 = 0.25
         stair_ff_wheel_radius = 0.085
-        stair_ff_step_height = 0.16
+        stair_ff_step_height = 0.2
         stair_ff_x0 = 0.0
         stair_ff_x1 = 0.12
         stair_ff_z_hip = 0.45
@@ -1251,7 +1251,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # z_peak = step_height + wheel_radius + clear_margin.
         # This replaces the old cycloid + h_margin trajectory.
         stair_ff_traj_type = "bezier_vertical_first"
-        stair_ff_clear_margin = 0.04
+        stair_ff_clear_margin = 0.045
 
         # Bezier control ratios:
         # P0 = start
