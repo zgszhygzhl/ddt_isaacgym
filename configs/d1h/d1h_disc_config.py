@@ -1215,7 +1215,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # of its rescue trajectory.  This is less aggressive than 0.50, but much
         # less likely to miss the second leg than the old 0.42 s impact-gated rule.
         stair_ff_duration = 0.6
-        stair_ff_followup_phase = 0.7
+        stair_ff_followup_phase = 0.8
         stair_ff_followup_phase_init = 0.00
         stair_ff_cooldown = 0.20
         stair_ff_extend_enabled = True
@@ -1264,6 +1264,18 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_bezier_p2_x_ratio = 0.05
         stair_ff_bezier_p3_x_ratio = 0.65
         stair_ff_bezier_p4_z_ratio = 0.25
+
+        # Opposite support-leg compensation.
+        # When one leg swings, the other leg is extended slightly to support the base.
+        stair_ff_support_enabled = True
+        stair_ff_support_hip_lift = 0.060
+        stair_ff_support_k = 0.80
+        stair_ff_support_ramp_ratio = 0.25
+        stair_ff_support_max_offset = 0.35
+
+        # Default stance angles used to compute IK-based support compensation.
+        stair_ff_support_default_thigh = 0.8
+        stair_ff_support_default_calf = -1.5
 
         # Blind trigger: sustained contact plus mild blocked-motion evidence.
         # These are intentionally not too strict, because the robot has no exteroceptive
