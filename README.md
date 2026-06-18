@@ -53,7 +53,6 @@ python scripts/train_residual.py \
   --stair_ff_anneal_iter_offset 7500 \
   --reset_residual_std 0.60
 
-
 python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
@@ -68,12 +67,9 @@ python scripts/train_residual.py \
   --residual_std_min 0.25 \
   --residual_std_max 0.75 \
   --resume \
-  --load_run Jun18_14-27-08_ \
-  --checkpoint 9600
-
-
-  --load_run Jun16_22-39-06_ \
-  --checkpoint 600 \
+  --load_run Jun18_20-57-49_ \
+  --checkpoint 12000 \
+  --stair_ff_anneal_iter_offset 1960
 
 
 
