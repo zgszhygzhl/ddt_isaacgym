@@ -69,7 +69,7 @@ python scripts/train_residual.py \
   --residual_std_max 0.75 \
   --stair_ff_scale 1.0 \
   --resume \
-  --load_run Jun18_02-25-03_ \
+  --load_run Jun18_12-47-57_ \
   --checkpoint 6000 \
 
 

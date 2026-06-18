@@ -1175,8 +1175,8 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # With num_rows=15 and step_height=[0.035, 0.185], rows 0..14 are
         # approximately 3.5, 4.5, ..., 17.5 cm. This extends the old distribution
         # instead of suddenly jumping to a fixed 17 cm stair.
-        num_rows = 5
-        step_height = [0.07, 0.09]
+        num_rows = 8
+        step_height = [0.06, 0.13]
         step_width_range = [0.40, 0.55]
         slope = [0.0, 0.02]
         slope_treshold = 0.20
@@ -1242,9 +1242,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_l1 = 0.25
         stair_ff_l2 = 0.25
         stair_ff_wheel_radius = 0.085
-        stair_ff_step_height = 0.2
+        stair_ff_step_height = 0.16
         stair_ff_x0 = 0.0
-        stair_ff_x1 = 0.12
+        stair_ff_x1 = 0.13
         stair_ff_z_hip = 0.45
 
         # Rounded vertical-first Bezier stair trajectory.
@@ -1268,9 +1268,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Opposite support-leg compensation.
         # When one leg swings, the other leg is extended slightly to support the base.
         stair_ff_support_enabled = True
-        stair_ff_support_hip_lift = 0.060
-        stair_ff_support_k = 0.80
-        stair_ff_support_ramp_ratio = 0.25
+        stair_ff_support_hip_lift = 0.050
+        stair_ff_support_k = 0.90
+        stair_ff_support_ramp_ratio = 0.35
         stair_ff_support_max_offset = 0.35
 
         # Default stance angles used to compute IK-based support compensation.
@@ -1280,7 +1280,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Blind trigger: sustained contact plus mild blocked-motion evidence.
         # These are intentionally not too strict, because the robot has no exteroceptive
         # perception and must react from proprioceptive/contact information.
-        stair_ff_contact_threshold = 45.0
+        stair_ff_contact_threshold = 42.0
         stair_ff_contact_force_axis = "horizontal"
         stair_ff_min_forward_travel = 0.12
         stair_ff_contact_stable_frames = 3
