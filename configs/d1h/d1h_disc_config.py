@@ -662,6 +662,10 @@ class D1HMoEDisc(D1HMoEBase):
 
         move_up = forward_progress > move_up_distance
 
+        current_level = self.terrain_levels[env_ids]
+        strict_min_level = int(getattr(self.cfg.terrain, "curriculum_move_up_strict_min_level", 3))
+        strict_gate = current_level >= strict_min_level
+
         height_ready = torch.ones_like(move_up, dtype=torch.bool)
         height_context = self._get_stair_height_context()
         if height_context is not None:
@@ -674,12 +678,14 @@ class D1HMoEDisc(D1HMoEBase):
             min_height_ratio = float(getattr(self.cfg.terrain, "curriculum_move_up_min_height_ratio", 0.55))
             min_base_height = float(getattr(self.cfg.terrain, "curriculum_move_up_min_base_height", 0.38))
             base_height = self._get_base_heights()[env_ids]
-            height_ready = (height_ratio >= min_height_ratio) & (base_height >= min_base_height)
+            strict_height_ready = (height_ratio >= min_height_ratio) & (base_height >= min_base_height)
+            height_ready = (~strict_gate) | strict_height_ready
 
-        anneal_ready = True
+        anneal_ready = torch.ones_like(move_up, dtype=torch.bool)
         if getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
             max_ff_scale = float(getattr(self.cfg.terrain, "curriculum_move_up_max_ff_scale", 0.75))
-            anneal_ready = self._get_stair_ff_anneal_scale().detach().item() <= max_ff_scale
+            anneal_scale = self._get_stair_ff_anneal_scale().detach().item()
+            anneal_ready = (~strict_gate) | (anneal_scale <= max_ff_scale)
 
         move_up = move_up & height_ready & anneal_ready
 
@@ -1376,9 +1382,10 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Stair-specific curriculum distances.
         # Move up only when the robot travels far enough.
         # Move down when it almost fails to make forward progress.
-        curriculum_move_up_distance = 4.0
-        curriculum_move_down_distance = 1.8
+        curriculum_move_up_distance = 3.0
+        curriculum_move_down_distance = 1.4
         curriculum_move_up_max_ff_scale = 0.75
+        curriculum_move_up_strict_min_level = 3
         curriculum_move_up_min_height_ratio = 0.55
         curriculum_move_up_min_base_height = 0.38
 
@@ -1593,7 +1600,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             tracking_lin_vel_x = 12.0
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 15.0
-            heading = -20.0
+            heading = -25.0
 
             # Stability guardrails. They should prevent garbage motion, not dominate climbing.
             orientation = -25.0
