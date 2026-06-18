@@ -22,6 +22,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_cooldown_until = torch.zeros(self.num_envs, 2, device=self.device)
         self.stair_ff_contact_hit_sum = torch.zeros(self.num_envs, device=self.device)
         self.stair_ff_active_sum = torch.zeros(self.num_envs, device=self.device)
+        self.last_stair_ff_teacher_offsets = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.last_stair_ff_offsets = torch.zeros(self.num_envs, self.num_actions, device=self.device)
 
     def reset_idx(self, env_ids):
@@ -62,6 +63,8 @@ class D1HMoEDisc(D1HMoEBase):
         self.stair_ff_cooldown_until[env_ids] = 0.0
         self.stair_ff_contact_hit_sum[env_ids] = 0.0
         self.stair_ff_active_sum[env_ids] = 0.0
+        if hasattr(self, "last_stair_ff_teacher_offsets"):
+            self.last_stair_ff_teacher_offsets[env_ids] = 0.0
         self.last_stair_ff_offsets[env_ids] = 0.0
 
     def step(self, actions):
@@ -206,18 +209,31 @@ class D1HMoEDisc(D1HMoEBase):
         if not getattr(self.cfg.control, "stair_ff_anneal_enabled", False):
             return torch.ones((), device=self.device)
 
+        override_scale = getattr(self.cfg.control, "stair_ff_anneal_override_scale", None)
+        if override_scale is not None:
+            return torch.as_tensor(float(override_scale), device=self.device).clamp(0.0, 1.0)
+
         steps_per_iter = max(int(getattr(self.cfg.control, "stair_ff_anneal_steps_per_iter", 32)), 1)
         train_iter = torch.as_tensor(
             float(getattr(self, "common_step_counter", 0)) / steps_per_iter,
             device=self.device,
         )
         start_iter = float(getattr(self.cfg.control, "stair_ff_anneal_start_iter", 0.0))
-        end_iter = float(getattr(self.cfg.control, "stair_ff_anneal_end_iter", start_iter + 1.0))
+        iterations = float(getattr(self.cfg.control, "stair_ff_anneal_iterations", 1.0))
+        end_iter = float(getattr(self.cfg.control, "stair_ff_anneal_end_iter", start_iter + iterations))
         final_scale = float(getattr(self.cfg.control, "stair_ff_anneal_final_scale", 0.0))
+        mode = str(getattr(self.cfg.control, "stair_ff_anneal_mode", "cosine")).lower()
 
         progress = torch.clamp((train_iter - start_iter) / max(end_iter - start_iter, 1e-6), 0.0, 1.0)
-        cosine_scale = 0.5 * (1.0 + torch.cos(math.pi * progress))
-        return final_scale + (1.0 - final_scale) * cosine_scale
+        if mode == "linear":
+            schedule = 1.0 - progress
+        elif mode in ("cos", "cosine"):
+            schedule = 0.5 * (1.0 + torch.cos(math.pi * progress))
+        elif mode in ("smoothstep", "smooth_step"):
+            schedule = 1.0 - progress * progress * (3.0 - 2.0 * progress)
+        else:
+            raise ValueError(f"Unknown stair_ff_anneal_mode: {mode}")
+        return final_scale + (1.0 - final_scale) * schedule
 
     def _trigger_stair_lift(self, env_mask, side, episode_time, is_followup=False):
         trigger_mask = (
@@ -277,6 +293,8 @@ class D1HMoEDisc(D1HMoEBase):
         """
         if not getattr(self.cfg.control, "stair_ff_enabled", True):
             self.last_stair_ff_signal.zero_()
+            if hasattr(self, "last_stair_ff_teacher_offsets"):
+                self.last_stair_ff_teacher_offsets.zero_()
             if hasattr(self, "last_stair_ff_offsets"):
                 self.last_stair_ff_offsets.zero_()
             return
@@ -284,6 +302,8 @@ class D1HMoEDisc(D1HMoEBase):
         contact_forces = self._get_stair_ff_contact_forces()
         if contact_forces is None:
             self.last_stair_ff_signal.zero_()
+            if hasattr(self, "last_stair_ff_teacher_offsets"):
+                self.last_stair_ff_teacher_offsets.zero_()
             if hasattr(self, "last_stair_ff_offsets"):
                 self.last_stair_ff_offsets.zero_()
             return
@@ -447,7 +467,7 @@ class D1HMoEDisc(D1HMoEBase):
         self.last_stair_trigger[no_active_after_update] = 0.0
         self.stair_followup_used[no_active_after_update] = False
 
-        # 这里只是 video/debug 用的信号，不直接参与 IK 前馈。
+        # 杩欓噷鍙槸 video/debug 鐢ㄧ殑淇″彿锛屼笉鐩存帴鍙備笌 IK 鍓嶉銆?
         phase = torch.clamp(self.stair_lift_phase, 0.0, 1.0)
         signal = 0.5 * (1.0 - torch.cos(2.0 * math.pi * phase))
 
@@ -478,15 +498,19 @@ class D1HMoEDisc(D1HMoEBase):
         """
         ff_offset = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         if not getattr(self.cfg.control, "stair_ff_enabled", True):
+            if hasattr(self, "last_stair_ff_teacher_offsets"):
+                self.last_stair_ff_teacher_offsets.zero_()
             if hasattr(self, "last_stair_ff_offsets"):
                 self.last_stair_ff_offsets.zero_()
             return ff_offset
         if not hasattr(self, "stair_lift_active") or not torch.any(self.stair_lift_active):
+            if hasattr(self, "last_stair_ff_teacher_offsets"):
+                self.last_stair_ff_teacher_offsets.zero_()
             if hasattr(self, "last_stair_ff_offsets"):
                 self.last_stair_ff_offsets.zero_()
             return ff_offset
 
-        ff_offset = compute_stair_ik_ff_offsets_b(
+        raw_ff_offset = compute_stair_ik_ff_offsets_b(
             phase_local=self.stair_lift_phase,
             active=self.stair_lift_active,
             dof_names=self.dof_names,
@@ -496,17 +520,21 @@ class D1HMoEDisc(D1HMoEBase):
         )
 
         k_ff = float(getattr(self.cfg.control, "stair_ff_k", 0.55))
-        anneal_scale = self._get_stair_ff_anneal_scale()
         ff_gate = self._get_stair_ff_gate().unsqueeze(1)
-        ff_offset = ff_gate * k_ff * anneal_scale * ff_offset
+        ff_teacher = ff_gate * k_ff * raw_ff_offset
 
         final_max = float(getattr(self.cfg.control, "stair_ff_final_max_offset", 0.65))
         if final_max > 0.0:
-            ff_offset = torch.clamp(ff_offset, -final_max, final_max)
+            ff_teacher = torch.clamp(ff_teacher, -final_max, final_max)
 
+        anneal_scale = self._get_stair_ff_anneal_scale()
+        ff_exec = anneal_scale * ff_teacher
+
+        if hasattr(self, "last_stair_ff_teacher_offsets"):
+            self.last_stair_ff_teacher_offsets = ff_teacher.detach()
         if hasattr(self, "last_stair_ff_offsets"):
-            self.last_stair_ff_offsets = ff_offset.detach()
-        return ff_offset
+            self.last_stair_ff_offsets = ff_exec.detach()
+        return ff_exec
 
     def _compute_torques(self, actions):
         """Compute torques with stair feedforward injected as joint-target offsets."""
@@ -875,7 +903,7 @@ class D1HMoEDisc(D1HMoEBase):
     def _reward_stair_ff_tracking(self):
         """Teach the policy/body to cooperate with the active IK feedforward target."""
         if (
-            not hasattr(self, "last_stair_ff_offsets")
+            not hasattr(self, "last_stair_ff_teacher_offsets")
             or not hasattr(self, "stair_lift_active")
             or not torch.any(self.stair_lift_active)
         ):
@@ -895,7 +923,7 @@ class D1HMoEDisc(D1HMoEBase):
                 continue
             joint_idx = self.dof_names.index(joint_name)
             active = self.stair_lift_active[:, side]
-            target = self.default_dof_pos[:, joint_idx] + self.last_stair_ff_offsets[:, joint_idx]
+            target = self.default_dof_pos[:, joint_idx] + self.last_stair_ff_teacher_offsets[:, joint_idx]
             sq_error += torch.square(self.dof_pos[:, joint_idx] - target) * active.float()
             active_count += active.float()
 
@@ -1290,10 +1318,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_min_upright = 0.62
         stair_ff_min_base_height = 0.30
 
-        # Feedforward annealing is disabled during terrain adaptation.
-        stair_ff_anneal_enabled = False
+        # Feedforward execution anneals away while the full IK target remains as a teacher.
+        stair_ff_anneal_enabled = True
+        stair_ff_anneal_mode = "cosine"
+        stair_ff_anneal_start_iter = 0
+        stair_ff_anneal_iterations = 4000
         stair_ff_anneal_override_scale = None
-        stair_ff_anneal_final_scale = 1.0
+        stair_ff_anneal_final_scale = 0.0
         stair_ff_anneal_steps_per_iter = 32
 
     class rewards(D1HMoEBaseCfg.rewards):
@@ -1306,7 +1337,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         base_height_target = 0.45
         base_height_scale = 0.04
         base_height_deadband = 0.03
-        stair_ff_tracking_sigma = 0.12
+        stair_ff_tracking_sigma = 0.10
 
         # Front height scan window used only by the stair rewards.
         step_clearance_front_x_min = 0.20
@@ -1420,14 +1451,14 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 1.5
-            stair_ff_tracking = 1.0
-            step_lift = 3.0
+            stair_ff_tracking = 4.0
+            step_lift = 4.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
             step_leg_imbalance = -10.0
             step_progress = 15.0
             step_up = 60.0
-            step_success = 80.0
+            step_success = 100.0
             step_stall = -12.0
             step_bump = -20.0
             opposite_base_vel = -48.0
