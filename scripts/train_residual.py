@@ -84,6 +84,9 @@ def train(args):
             env.cfg.control.stair_ff_anneal_override_scale = float(args.stair_ff_scale)
         if args.stair_ff_anneal_iter_offset is not None:
             env.cfg.control.stair_ff_anneal_iter_offset = float(args.stair_ff_anneal_iter_offset)
+    if hasattr(env.cfg, "rewards"):
+        diagnostic_clip = float(args.residual_delta_clip) if args.residual_delta_clip > 0.0 else 0.55
+        env.cfg.rewards.residual_delta_clip_for_diagnostics = diagnostic_clip
 
     _, train_cfg = task_registry.get_cfgs(args.task)
     _, base_train_cfg = task_registry.get_cfgs(args.base_task)
