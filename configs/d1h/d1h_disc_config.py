@@ -1702,7 +1702,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 1.5
-            stair_ff_tracking = 40.0
+            stair_ff_tracking = 28.0
             step_lift = 4.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
