@@ -533,14 +533,13 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
 
 class D1HMoERecCfgPPO(D1HMoEBaseCfgPPO):
     class policy(D1HMoEBaseCfgPPO.policy):
-        scan_encoder_dims = [128, 64, 32]
-        actor_hidden_dims = [512, 256, 128]
-        barlow_actor_hidden_dims = [512, 256, 128]
-        barlow_mlp_encoder_dims = [128, 64]
-        barlow_latent_dim = 16
-        barlow_obs_encoder_dims = [128, 64]
-        critic_hidden_dims = [512, 256, 128]
-        priv_encoder_dims = []
+        actor_hidden_dims = [128, 64]
+        critic_hidden_dims = [256, 128]
+        barlow_actor_hidden_dims = [128, 64]
+        barlow_mlp_encoder_dims = [96, 48]
+        barlow_obs_encoder_dims = [96, 48]
+        barlow_latent_dim = 12
+        init_noise_std = 0.45
 
     class runner(D1HMoEBaseCfgPPO.runner):
         experiment_name = 'd1h_moe_rec'
