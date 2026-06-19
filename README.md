@@ -26,9 +26,9 @@ ffmpeg -y -i /root/gpufree-data/ddt_rl_isaacgym/record.mp4 -c:v libx264 -pix_fmt
 
 看板
 tensorboard \
-  --logdir logs/d1h_moe_disc \
+  --logdir logs/d1h_moe_rec \
   --host 0.0.0.0 \
-  --port 6008
+  --port 6011
 
 tmux
 tmux new -s d1h_train

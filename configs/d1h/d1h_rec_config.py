@@ -1,6 +1,6 @@
 import torch
 from isaacgym.torch_utils import quat_from_euler_xyz, torch_rand_float
-from isaacgym import gymtorch
+from isaacgym import gymapi, gymtorch
 
 from .d1h_base_config import D1HMoEBase, D1HMoEBaseCfg, D1HMoEBaseCfgPPO
 
@@ -12,78 +12,88 @@ class D1HMoERecovery(D1HMoEBase):
         self.recovered_time = torch.zeros(self.num_envs, device=self.device)
         self.episode_recovered = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.recovery_recent_success = torch.zeros(0, dtype=torch.float, device=self.device)
+        self.hard_contact_time = torch.zeros(self.num_envs, device=self.device)
+        self.env_recovery_levels = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
-    def _get_recovery_curriculum_params(self):
-        level = int(self.recovery_level)
+    def _get_recovery_curriculum_params(self, level=None):
+        level = int(self.recovery_level if level is None else level)
 
         if level <= 0:
             return dict(
-                roll=0.0,
-                pitch=0.0,
-                yaw=0.0,
-                joint_noise=0.0,
-                lin_vel=0.0,
-                ang_vel=0.0,
+                roll=0.10,
+                pitch=0.10,
+                yaw=0.15,
+                joint_noise=0.04,
+                lin_vel=0.08,
+                ang_vel=0.40,
                 push=False,
                 disturbance=False,
                 max_push_vel_xy=0.0,
                 disturbance_range=0.0,
-                friction_range=(0.8, 1.2),
             )
         if level == 1:
             return dict(
-                roll=0.08,
-                pitch=0.08,
-                yaw=0.10,
-                joint_noise=0.05,
-                lin_vel=0.05,
-                ang_vel=0.20,
-                push=False,
-                disturbance=False,
-                max_push_vel_xy=0.0,
-                disturbance_range=0.0,
-                friction_range=(0.7, 1.3),
-            )
-        if level == 2:
-            return dict(
                 roll=0.25,
                 pitch=0.25,
-                yaw=0.30,
-                joint_noise=0.12,
+                yaw=0.35,
+                joint_noise=0.10,
                 lin_vel=0.15,
                 ang_vel=0.80,
                 push=False,
                 disturbance=False,
                 max_push_vel_xy=0.0,
                 disturbance_range=0.0,
-                friction_range=(0.6, 1.5),
             )
-        if level == 3:
+        if level == 2:
             return dict(
                 roll=0.55,
                 pitch=0.55,
-                yaw=0.60,
-                joint_noise=0.20,
+                yaw=0.70,
+                joint_noise=0.18,
                 lin_vel=0.30,
-                ang_vel=2.00,
+                ang_vel=1.80,
+                push=True,
+                disturbance=False,
+                max_push_vel_xy=0.35,
+                disturbance_range=0.0,
+            )
+        if level == 3:
+            return dict(
+                roll=0.85,
+                pitch=0.85,
+                yaw=1.10,
+                joint_noise=0.24,
+                lin_vel=0.45,
+                ang_vel=3.00,
                 push=True,
                 disturbance=True,
-                max_push_vel_xy=0.4,
-                disturbance_range=10.0,
-                friction_range=(0.5, 1.6),
+                max_push_vel_xy=0.70,
+                disturbance_range=20.0,
             )
         return dict(
-            roll=0.70,
-            pitch=0.70,
-            yaw=1.00,
-            joint_noise=0.25,
-            lin_vel=0.40,
-            ang_vel=3.00,
+            roll=1.00,
+            pitch=1.00,
+            yaw=1.30,
+            joint_noise=0.28,
+            lin_vel=0.50,
+            ang_vel=3.20,
             push=True,
             disturbance=True,
-            max_push_vel_xy=0.8,
+            max_push_vel_xy=0.80,
             disturbance_range=25.0,
-            friction_range=(0.35, 1.8),
+        )
+
+    def _sample_env_recovery_levels(self, env_ids):
+        max_level = int(self.recovery_level)
+        if max_level <= 0:
+            self.env_recovery_levels[env_ids] = 0
+            return
+
+        self.env_recovery_levels[env_ids] = torch.randint(
+            0,
+            max_level + 1,
+            (len(env_ids),),
+            device=self.device,
         )
 
     def _get_folded_dof_pos(self, env_ids):
@@ -118,36 +128,23 @@ class D1HMoERecovery(D1HMoEBase):
         return q
 
     def _reset_dofs(self, env_ids):
-        params = self._get_recovery_curriculum_params()
         n = len(env_ids)
         folded_q = self._get_folded_dof_pos(env_ids)
+        joint_noise = torch.zeros(n, 1, device=self.device)
+        for level in torch.unique(self.env_recovery_levels[env_ids]).tolist():
+            level_mask = self.env_recovery_levels[env_ids] == int(level)
+            params = self._get_recovery_curriculum_params(level)
+            joint_noise[level_mask] = float(params["joint_noise"])
 
-        if self.recovery_level <= 0:
-            small_noise_mask = torch.rand(n, device=self.device) < 0.20
-            noise = torch.zeros((n, self.num_dof), device=self.device)
-            if small_noise_mask.any():
-                noise[small_noise_mask] = torch_rand_float(
-                    -0.03,
-                    0.03,
-                    (int(small_noise_mask.sum().item()), self.num_dof),
-                    device=self.device,
-                )
-            self.dof_pos[env_ids] = folded_q + noise
-            self.dof_vel[env_ids] = 0.0
-        else:
-            joint_noise = float(params["joint_noise"])
-            self.dof_pos[env_ids] = folded_q + torch_rand_float(
-                -joint_noise,
-                joint_noise,
-                (n, self.num_dof),
-                device=self.device,
-            )
-            self.dof_vel[env_ids] = torch_rand_float(
-                -0.1,
-                0.1,
-                (n, self.num_dof),
-                device=self.device,
-            )
+        self.dof_pos[env_ids] = folded_q + torch_rand_float(
+            -1.0,
+            1.0,
+            (n, self.num_dof),
+            device=self.device,
+        ) * joint_noise
+        dof_vel = torch_rand_float(-0.1, 0.1, (n, self.num_dof), device=self.device)
+        dof_vel[self.env_recovery_levels[env_ids] <= 0] = 0.0
+        self.dof_vel[env_ids] = dof_vel
 
         if hasattr(self, "dof_pos_limits"):
             lower = self.dof_pos_limits[:, 0].unsqueeze(0)
@@ -163,7 +160,6 @@ class D1HMoERecovery(D1HMoEBase):
         )
 
     def _reset_root_states(self, env_ids):
-        params = self._get_recovery_curriculum_params()
         n = len(env_ids)
 
         if self.custom_origins:
@@ -173,42 +169,48 @@ class D1HMoERecovery(D1HMoEBase):
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
 
-        if self.recovery_level <= 0:
-            random_roll = torch.zeros(n, device=self.device)
-            random_pitch = torch.zeros(n, device=self.device)
-            random_yaw = torch.zeros(n, device=self.device)
-            self.root_states[env_ids, 7:13] = 0.0
-        else:
-            random_roll = torch_rand_float(
+        random_roll = torch.zeros(n, device=self.device)
+        random_pitch = torch.zeros(n, device=self.device)
+        random_yaw = torch.zeros(n, device=self.device)
+        lin_vel = torch.zeros(n, 3, device=self.device)
+        ang_vel = torch.zeros(n, 3, device=self.device)
+
+        for level in torch.unique(self.env_recovery_levels[env_ids]).tolist():
+            level_mask = self.env_recovery_levels[env_ids] == int(level)
+            count = int(level_mask.sum().item())
+            params = self._get_recovery_curriculum_params(level)
+            random_roll[level_mask] = torch_rand_float(
                 -float(params["roll"]),
                 float(params["roll"]),
-                (n, 1),
+                (count, 1),
                 device=self.device,
             ).squeeze(1)
-            random_pitch = torch_rand_float(
+            random_pitch[level_mask] = torch_rand_float(
                 -float(params["pitch"]),
                 float(params["pitch"]),
-                (n, 1),
+                (count, 1),
                 device=self.device,
             ).squeeze(1)
-            random_yaw = torch_rand_float(
+            random_yaw[level_mask] = torch_rand_float(
                 -float(params["yaw"]),
                 float(params["yaw"]),
-                (n, 1),
+                (count, 1),
                 device=self.device,
             ).squeeze(1)
-            self.root_states[env_ids, 7:10] = torch_rand_float(
+            lin_vel[level_mask] = torch_rand_float(
                 -float(params["lin_vel"]),
                 float(params["lin_vel"]),
-                (n, 3),
+                (count, 3),
                 device=self.device,
             )
-            self.root_states[env_ids, 10:13] = torch_rand_float(
+            ang_vel[level_mask] = torch_rand_float(
                 -float(params["ang_vel"]),
                 float(params["ang_vel"]),
-                (n, 3),
+                (count, 3),
                 device=self.device,
             )
+        self.root_states[env_ids, 7:10] = lin_vel
+        self.root_states[env_ids, 10:13] = ang_vel
 
         self.root_states[env_ids, 3:7] = quat_from_euler_xyz(
             random_roll,
@@ -226,19 +228,66 @@ class D1HMoERecovery(D1HMoEBase):
 
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
+        if self.common_step_counter % self.cfg.domain_rand.push_interval == 0:
+            self._push_recovery_envs()
+        if self.common_step_counter % self.cfg.domain_rand.disturbance_interval == 0:
+            self._disturbance_recovery_envs()
         self._update_recovered_time()
+
+    def _push_recovery_envs(self):
+        for level in torch.unique(self.env_recovery_levels).tolist():
+            params = self._get_recovery_curriculum_params(level)
+            if not params["push"]:
+                continue
+            env_mask = self.env_recovery_levels == int(level)
+            max_push_vel_xy = float(params["max_push_vel_xy"])
+            self.root_states[env_mask, 7:9] = torch_rand_float(
+                -max_push_vel_xy,
+                max_push_vel_xy,
+                (int(env_mask.sum().item()), 2),
+                device=self.device,
+            )
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+
+    def _disturbance_recovery_envs(self):
+        self.disturbance.zero_()
+        any_disturbance = False
+        for level in torch.unique(self.env_recovery_levels).tolist():
+            params = self._get_recovery_curriculum_params(level)
+            if not params["disturbance"]:
+                continue
+            env_mask = self.env_recovery_levels == int(level)
+            disturbance_range = float(params["disturbance_range"])
+            if disturbance_range <= 0.0:
+                continue
+            count = int(env_mask.sum().item())
+            self.disturbance[env_mask, 0, :] = torch_rand_float(
+                -disturbance_range,
+                disturbance_range,
+                (count, 3),
+                device=self.device,
+            )
+            any_disturbance = True
+        if any_disturbance:
+            self.gym.apply_rigid_body_force_tensors(
+                self.sim,
+                forceTensor=gymtorch.unwrap_tensor(self.disturbance),
+                space=gymapi.CoordinateSpace.LOCAL_SPACE,
+            )
 
     def _is_recovered(self):
         upright_score = -self.projected_gravity[:, 2]
         base_height = self._get_base_heights()
         ang_vel_xy = torch.norm(self.base_ang_vel[:, :2], dim=1)
         lin_vel_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)
+        lin_vel_z = torch.abs(self.base_lin_vel[:, 2])
 
         upright = upright_score > 0.85
         height_ok = base_height > self.cfg.env.recovery_target_height
         low_ang = ang_vel_xy < 0.6
         low_lin = lin_vel_xy < 0.35
-        return upright & height_ok & low_ang & low_lin
+        low_lin_z = lin_vel_z < 0.35
+        return upright & height_ok & low_ang & low_lin & low_lin_z
 
     def _update_recovered_time(self):
         recovered_now = self._is_recovered()
@@ -275,7 +324,13 @@ class D1HMoERecovery(D1HMoEBase):
             torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0,
             dim=1,
         )
+        hard_contact = torch.any(
+            torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1)
+            > self.cfg.env.recovery_hard_contact_force,
+            dim=1,
+        )
         past_grace_time = episode_time >= self.cfg.env.contact_termination_grace_time
+        past_hard_grace_time = episode_time >= self.cfg.env.hard_contact_termination_grace_time
         recovered_now = self._is_recovered()
 
         self.bad_contact_time = torch.where(
@@ -283,11 +338,17 @@ class D1HMoERecovery(D1HMoEBase):
             self.bad_contact_time + self.dt,
             torch.zeros_like(self.bad_contact_time),
         )
+        self.hard_contact_time = torch.where(
+            hard_contact & past_hard_grace_time,
+            self.hard_contact_time + self.dt,
+            torch.zeros_like(self.hard_contact_time),
+        )
 
         contact_reset = self.bad_contact_time >= self.cfg.env.contact_termination_duration
+        hard_contact_reset = self.hard_contact_time >= self.cfg.env.hard_contact_termination_duration
         low_height_reset = base_height < self.cfg.env.recovery_min_height_for_reset
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
-        self.reset_buf = contact_reset | low_height_reset | self.time_out_buf
+        self.reset_buf = contact_reset | hard_contact_reset | low_height_reset | self.time_out_buf
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -295,21 +356,25 @@ class D1HMoERecovery(D1HMoEBase):
 
         success_rate = None
         if hasattr(self, "episode_recovered"):
-            success = self.episode_recovered[env_ids].float().detach()
-            self.recovery_recent_success = torch.cat([self.recovery_recent_success, success])
-            max_items = int(getattr(self.cfg.env, "recovery_min_success_episodes", 256))
-            if self.recovery_recent_success.numel() > max_items:
-                self.recovery_recent_success = self.recovery_recent_success[-max_items:]
+            finished_env_ids = env_ids[self.episode_length_buf[env_ids] > 0]
+            if len(finished_env_ids) > 0:
+                success = self.episode_recovered[finished_env_ids].float().detach()
+                self.recovery_recent_success = torch.cat([self.recovery_recent_success, success])
+                max_items = int(getattr(self.cfg.env, "recovery_min_success_episodes", 256))
+                if self.recovery_recent_success.numel() > max_items:
+                    self.recovery_recent_success = self.recovery_recent_success[-max_items:]
 
-            if self.recovery_recent_success.numel() > 0:
-                success_rate = self.recovery_recent_success.mean()
-            self._maybe_update_recovery_curriculum()
+                if self.recovery_recent_success.numel() > 0:
+                    success_rate = self.recovery_recent_success.mean()
+                self._maybe_update_recovery_curriculum()
 
+        self._sample_env_recovery_levels(env_ids)
         super().reset_idx(env_ids)
 
         if hasattr(self, "episode_recovered"):
             self.recovered_time[env_ids] = 0.0
             self.episode_recovered[env_ids] = False
+        self.hard_contact_time[env_ids] = 0.0
 
         if "episode" in self.extras:
             self.extras["episode"]["recovery_level"] = torch.as_tensor(
@@ -324,6 +389,7 @@ class D1HMoERecovery(D1HMoEBase):
                 else torch.tensor(0.0, device=self.device)
             )
             self.extras["episode"]["recovery_mean_recovered_time"] = self.recovered_time.mean()
+            self.extras["episode"]["recovery_sampled_level_mean"] = self.env_recovery_levels.float().mean()
 
     def _reward_recovery_height(self):
         h = self._get_base_heights()
@@ -353,17 +419,21 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
         recovery_curriculum = True
         recovery_start_level = 0
         recovery_max_level = 4
-        recovery_success_threshold = 0.80
-        recovery_min_success_episodes = 256
-        recovery_success_hold_time = 0.50
+        recovery_success_threshold = 0.70
+        recovery_min_success_episodes = 1024
+        recovery_success_hold_time = 0.35
 
         recovery_target_height = 0.38
         recovery_min_height_for_reset = 0.03
-        contact_termination_grace_time = 4.0
-        contact_termination_duration = 0.35
+        contact_termination_grace_time = 1.0
+        contact_termination_duration = 0.20
+        hard_contact_termination_grace_time = 0.80
+        hard_contact_termination_duration = 0.25
+        recovery_hard_contact_force = 250.0
         min_base_height_for_reset = 0.03
 
     class init_state(D1HMoEBaseCfg.init_state):
+        pos = [0.0, 0.0, 0.16]
         reset_joint_angles = {
             "FL_hip_joint": 0.2,
             "FR_hip_joint": -0.2,
@@ -371,6 +441,16 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
             "FR_thigh_joint": 1.3,
             "FL_calf_joint": -2.75,
             "FR_calf_joint": -2.75,
+            "FL_foot_joint": 0.0,
+            "FR_foot_joint": 0.0,
+        }
+        default_joint_angles = {
+            "FL_hip_joint": 0.0,
+            "FR_hip_joint": 0.0,
+            "FL_thigh_joint": 0.8,
+            "FR_thigh_joint": 0.8,
+            "FL_calf_joint": -1.5,
+            "FR_calf_joint": -1.5,
             "FL_foot_joint": 0.0,
             "FR_foot_joint": 0.0,
         }
@@ -410,7 +490,7 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
         randomize_base_com = True
         added_com_range = [-0.05, 0.05]
         randomize_friction = True
-        friction_range = [0.7, 1.3]
+        friction_range = [0.6, 1.3]
 
     class rewards(D1HMoEBaseCfg.rewards):
         class scales(D1HMoEBaseCfg.rewards.scales):
@@ -419,7 +499,7 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
             tracking_lin_vel_y = 0.0
             tracking_ang_vel = 0.0
             feet_air_time = 0.0
-            stand_still = 0.0
+            stand_still = -0.8
             zero_yaw_rate = 0.0
             heading = 0.0
             lin_vel_z = 0.0
@@ -466,3 +546,14 @@ class D1HMoERecCfgPPO(D1HMoEBaseCfgPPO):
         experiment_name = 'd1h_moe_rec'
         run_name = 'folded_recovery_curriculum'
         max_iterations = 8000
+        num_steps_per_env = 32
+        save_interval = 200
+        record_video = True
+        video_interval = 300
+        video_duration = 5.0
+        video_fps = 30
+        video_num_envs = 16
+        video_tile_rows = 4
+        video_tile_cols = 4
+        video_tile_width = 320
+        video_tile_height = 180
