@@ -39,19 +39,20 @@ tmux attach -t d1h_train
 python scripts/train_residual.py \
   --task d1h_moe_disc \
   --base_task d1h_moe_base \
-  --resume \
-  --load_run Jun12_11-25-56_ \
-  --checkpoint 9000 \
   --base_ckpt logs/d1h_moe_base/Jun06_09-51-25_/model_7400.pt \
   --headless \
   --num_envs 4096 \
-  --max_iterations 10000 \
-  --residual_alpha 0.50 \
-  --residual_delta_clip 0.45 \
-  --residual_std_min 0.25 \
-  --residual_std_max 0.65 \
-  --stair_ff_anneal_iter_offset 7500 \
-  --reset_residual_std 0.60
+  --max_iterations 2000 \
+  --residual_alpha 0.5 \
+  --residual_alpha_warmup_steps 1 \
+  --residual_alpha_warmup_min 1.0 \
+  --residual_delta_clip 0 \
+  --residual_std_min 0.18 \
+  --residual_std_max 0.55 \
+  --stair_ff_scale 0.0 \
+  --resume \
+  --load_run Jun19_11-48-38_ \
+  --checkpoint 13800
 
 
 python scripts/train_residual.py \

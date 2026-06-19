@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import torch
 from utils.stair_ik_feedforward import compute_stair_ik_ff_offsets_b
 
@@ -1340,16 +1341,67 @@ class D1HMoEDisc(D1HMoEBase):
         penalty = torch.clamp(-self.base_lin_vel[:, 0] / torch.clamp(cmd_x, min=0.05), 0.0, 1.0)
         return backward.float() * penalty
 
+    def _update_command_curriculum(self, env_ids):
+        """Gradually widen forward-speed commands after x tracking is good."""
+
+        if "tracking_lin_vel_x" not in self.reward_scales or len(env_ids) == 0:
+            return
+
+        mean_tracking = torch.mean(self.episode_sums["tracking_lin_vel_x"][env_ids]) / self.max_episode_length
+        threshold = float(getattr(self.cfg.commands, "curriculum_tracking_threshold", 0.72))
+        if mean_tracking <= threshold * self.reward_scales["tracking_lin_vel_x"]:
+            return
+
+        step_up = float(getattr(self.cfg.commands, "curriculum_x_step_up", 0.04))
+        step_down = float(getattr(self.cfg.commands, "curriculum_x_step_down", 0.02))
+        min_forward = float(getattr(self.cfg.commands, "min_curriculum_x", 0.25))
+        max_forward = float(getattr(self.cfg.commands, "max_curriculum_x", 0.65))
+        current_min, current_max = self.command_ranges["lin_vel_x"]
+        self.command_ranges["lin_vel_x"][0] = np.clip(current_min - step_down, min_forward, current_max)
+        self.command_ranges["lin_vel_x"][1] = np.clip(current_max + step_up, current_min, max_forward)
+
+    def _reward_stair_lateral_vel(self):
+        """Penalize side drift when the command does not ask for it."""
+
+        deadband = float(getattr(self.cfg.rewards, "stair_lateral_vel_deadband", 0.04))
+        full = float(getattr(self.cfg.rewards, "stair_lateral_vel_full", 0.30))
+        vy = torch.abs(self.base_lin_vel[:, 1] - self.commands[:, 1])
+        score = torch.clamp((vy - deadband) / max(full - deadband, 1e-6), 0.0, 1.0)
+        return torch.square(score)
+
+    def _reward_stair_yaw_swing(self):
+        """Penalize yaw-rate swing beyond what the heading controller is asking for."""
+
+        deadband = float(getattr(self.cfg.rewards, "stair_yaw_rate_deadband", 0.15))
+        full = float(getattr(self.cfg.rewards, "stair_yaw_rate_full", 1.00))
+        allowed = torch.abs(self.commands[:, 2]) + deadband
+        yaw_excess = torch.clamp(torch.abs(self.base_ang_vel[:, 2]) - allowed, min=0.0)
+        score = torch.clamp(yaw_excess / max(full - deadband, 1e-6), 0.0, 1.0)
+        return torch.square(score)
+
+    def _reward_stair_roll_pitch_rate(self):
+        """Penalize fast roll/pitch angular motion."""
+
+        deadband = float(getattr(self.cfg.rewards, "stair_roll_pitch_rate_deadband", 0.40))
+        full = float(getattr(self.cfg.rewards, "stair_roll_pitch_rate_full", 2.50))
+        rate = torch.norm(self.base_ang_vel[:, :2], dim=1)
+        score = torch.clamp((rate - deadband) / max(full - deadband, 1e-6), 0.0, 1.0)
+        return torch.square(score)
+
 
 class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
         # Stage A: keep speed near the previously successful 0.4 m/s band.
         # Terrain difficulty is handled only by the forward-distance curriculum.
-        curriculum = False
-        max_curriculum_x = 0.55
+        curriculum = True
+        min_curriculum_x = 0.25
+        max_curriculum_x = 0.65
         max_curriculum_x_back = 0.0
         max_curriculum_y = 0.0
         max_curriculum_yaw = 0.0
+        curriculum_x_step_up = 0.04
+        curriculum_x_step_down = 0.02
+        curriculum_tracking_threshold = 0.72
         resampling_time = 10.0
         heading_command = True
         zero_command_ratio = 0.0
@@ -1587,6 +1639,12 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_leg_imbalance_min_lead = 0.65
         step_leg_imbalance_grace_time = 0.25
         step_leg_imbalance_time_scale = 0.35
+        stair_lateral_vel_deadband = 0.04
+        stair_lateral_vel_full = 0.30
+        stair_yaw_rate_deadband = 0.15
+        stair_yaw_rate_full = 1.00
+        stair_roll_pitch_rate_deadband = 0.40
+        stair_roll_pitch_rate_full = 2.50
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
@@ -1656,6 +1714,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_stall = -24.0
             step_bump = -20.0
             opposite_base_vel = -48.0
+            stair_lateral_vel = -18.0
+            stair_yaw_swing = -14.0
+            stair_roll_pitch_rate = -10.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
