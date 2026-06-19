@@ -52,7 +52,7 @@ python scripts/train_residual.py \
   --stair_ff_scale 0.0 \
   --resume \
   --load_run Jun19_11-48-38_ \
-  --checkpoint 13800
+  --checkpoint 14000
 
 
 python scripts/train_residual.py \

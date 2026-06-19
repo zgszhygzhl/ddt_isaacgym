@@ -1393,7 +1393,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
     class commands(D1HMoEBaseCfg.commands):
         # Stage A: keep speed near the previously successful 0.4 m/s band.
         # Terrain difficulty is handled only by the forward-distance curriculum.
-        curriculum = True
+        curriculum = False
         min_curriculum_x = 0.25
         max_curriculum_x = 0.65
         max_curriculum_x_back = 0.0
@@ -1640,11 +1640,11 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         step_leg_imbalance_grace_time = 0.25
         step_leg_imbalance_time_scale = 0.35
         stair_lateral_vel_deadband = 0.04
-        stair_lateral_vel_full = 0.30
+        stair_lateral_vel_full = 0.35
         stair_yaw_rate_deadband = 0.15
-        stair_yaw_rate_full = 1.00
+        stair_yaw_rate_full = 1.20
         stair_roll_pitch_rate_deadband = 0.40
-        stair_roll_pitch_rate_full = 2.50
+        stair_roll_pitch_rate_full = 3.00
 
         class scales(D1HMoEBaseCfg.rewards.scales):
             # Disabled legacy aggregate tracker; this expert uses axis-specific tracking below.
@@ -1714,9 +1714,9 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             step_stall = -24.0
             step_bump = -20.0
             opposite_base_vel = -48.0
-            stair_lateral_vel = -18.0
-            stair_yaw_swing = -14.0
-            stair_roll_pitch_rate = -10.0
+            stair_lateral_vel = -8.0
+            stair_yaw_swing = -6.0
+            stair_roll_pitch_rate = -4.0
 
     class normalization(D1HMoEBaseCfg.normalization):
         # Keep exploration broad enough for stair actions, but prevent unbounded
