@@ -279,15 +279,11 @@ class D1HMoERecovery(D1HMoEBase):
         upright_score = -self.projected_gravity[:, 2]
         base_height = self._get_base_heights()
         ang_vel_xy = torch.norm(self.base_ang_vel[:, :2], dim=1)
-        lin_vel_xy = torch.norm(self.base_lin_vel[:, :2], dim=1)
-        lin_vel_z = torch.abs(self.base_lin_vel[:, 2])
 
-        upright = upright_score > 0.85
-        height_ok = base_height > self.cfg.env.recovery_target_height
-        low_ang = ang_vel_xy < 0.6
-        low_lin = lin_vel_xy < 0.35
-        low_lin_z = lin_vel_z < 0.35
-        return upright & height_ok & low_ang & low_lin & low_lin_z
+        upright = upright_score > 0.75
+        height_ok = base_height > 0.32
+        not_spinning = ang_vel_xy < 1.5
+        return upright & height_ok & not_spinning
 
     def _update_recovered_time(self):
         recovered_now = self._is_recovered()
@@ -324,13 +320,7 @@ class D1HMoERecovery(D1HMoEBase):
             torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0,
             dim=1,
         )
-        hard_contact = torch.any(
-            torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1)
-            > self.cfg.env.recovery_hard_contact_force,
-            dim=1,
-        )
         past_grace_time = episode_time >= self.cfg.env.contact_termination_grace_time
-        past_hard_grace_time = episode_time >= self.cfg.env.hard_contact_termination_grace_time
         recovered_now = self._is_recovered()
 
         self.bad_contact_time = torch.where(
@@ -338,14 +328,9 @@ class D1HMoERecovery(D1HMoEBase):
             self.bad_contact_time + self.dt,
             torch.zeros_like(self.bad_contact_time),
         )
-        self.hard_contact_time = torch.where(
-            hard_contact & past_hard_grace_time,
-            self.hard_contact_time + self.dt,
-            torch.zeros_like(self.hard_contact_time),
-        )
 
         contact_reset = self.bad_contact_time >= self.cfg.env.contact_termination_duration
-        hard_contact_reset = self.hard_contact_time >= self.cfg.env.hard_contact_termination_duration
+        hard_contact_reset = torch.zeros_like(self.reset_buf, dtype=torch.bool)
         low_height_reset = base_height < self.cfg.env.recovery_min_height_for_reset
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf = contact_reset | hard_contact_reset | low_height_reset | self.time_out_buf
@@ -417,19 +402,19 @@ class D1HMoERecCfg(D1HMoEBaseCfg):
         episode_length_s = 6.0
 
         recovery_curriculum = True
-        recovery_start_level = 0
+        recovery_start_level = 2
         recovery_max_level = 4
-        recovery_success_threshold = 0.70
-        recovery_min_success_episodes = 1024
-        recovery_success_hold_time = 0.35
+        recovery_success_threshold = 0.55
+        recovery_min_success_episodes = 512
+        recovery_success_hold_time = 0.15
 
         recovery_target_height = 0.38
         recovery_min_height_for_reset = 0.03
         contact_termination_grace_time = 1.0
         contact_termination_duration = 0.20
-        hard_contact_termination_grace_time = 0.80
-        hard_contact_termination_duration = 0.25
-        recovery_hard_contact_force = 250.0
+        hard_contact_termination_grace_time = 999.0
+        hard_contact_termination_duration = 999.0
+        recovery_hard_contact_force = 9999.0
         min_base_height_for_reset = 0.03
 
     class init_state(D1HMoEBaseCfg.init_state):
