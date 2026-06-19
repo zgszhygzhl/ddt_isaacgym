@@ -248,18 +248,21 @@ def compute_stair_ik_ff_offsets_b(
     cfg_control,
 ):
     """
-    Stair feedforward = swing-leg Bezier IK + opposite support-leg compensation.
+    Stair feedforward = swing-leg Bezier IK + landing hold + support compensation.
 
     For each active swing leg:
         1. apply Bezier swing offset to that leg;
-        2. apply stance support compensation to the opposite leg.
+        2. after landing, keep part of the swing offset while the opposite leg
+           is still swinging, so the high-step side does not become too tall;
+        3. apply stance support compensation to the opposite leg only when that
+           opposite leg can actually support.
 
     phase_local u:
         0 ~ 1:
             swing phase
 
         1 ~ 1 + extend_ratio:
-            swing offset releases back to zero
+            recovery / release phase
 
     The returned value is in radians and is added to joint_pos_target.
     """
@@ -297,7 +300,7 @@ def compute_stair_ik_ff_offsets_b(
     max_offset = float(_cfg_get(cfg_control, "stair_ff_max_offset", 1.20))
 
     extend_enabled = bool(_cfg_get(cfg_control, "stair_ff_extend_enabled", True))
-    extend_ratio = float(_cfg_get(cfg_control, "stair_ff_extend_ratio", 0.30))
+    extend_ratio = float(_cfg_get(cfg_control, "stair_ff_extend_ratio", 0.80))
     extend_ratio = max(extend_ratio, 0.0)
 
     phase_end = 1.0 + extend_ratio if extend_enabled else 1.0
@@ -308,6 +311,24 @@ def compute_stair_ik_ff_offsets_b(
     support_k = float(_cfg_get(cfg_control, "stair_ff_support_k", 0.80))
     support_ramp_ratio = float(_cfg_get(cfg_control, "stair_ff_support_ramp_ratio", 0.25))
     support_max_offset = float(_cfg_get(cfg_control, "stair_ff_support_max_offset", 0.35))
+
+    # ========== landing hold / high-step support parameters ==========
+    landing_hold_ratio = float(_cfg_get(cfg_control, "stair_ff_landing_hold_ratio", 0.35))
+    landing_hold_ratio = _clamp_float(landing_hold_ratio, 0.0, 1.0)
+
+    landing_release_opposite_phase = float(
+        _cfg_get(cfg_control, "stair_ff_landing_release_opposite_phase", 0.90)
+    )
+    landing_release_opposite_phase = _clamp_float(landing_release_opposite_phase, 0.0, 1.0)
+
+    # Smoothly release landing hold as the opposite leg approaches
+    # landing_release_opposite_phase.
+    landing_release_window = float(_cfg_get(cfg_control, "stair_ff_landing_release_window", 0.20))
+    landing_release_window = max(landing_release_window, 1e-6)
+
+    # Ground-side support is full strength.  High-step landed support is weakened.
+    high_step_support_scale = float(_cfg_get(cfg_control, "stair_ff_high_step_support_scale", 0.25))
+    high_step_support_scale = _clamp_float(high_step_support_scale, 0.0, 1.0)
 
     q1_default_support = float(_cfg_get(cfg_control, "stair_ff_support_default_thigh", 0.8))
     q2_default_support = float(_cfg_get(cfg_control, "stair_ff_support_default_calf", -1.5))
@@ -358,6 +379,10 @@ def compute_stair_ik_ff_offsets_b(
         if not torch.any(side_active):
             continue
 
+        opposite_side = 1 - side
+        opposite_active = active[:, opposite_side]
+        opposite_phase = torch.clamp(phase_local[:, opposite_side], 0.0, phase_end)
+
         u_total = torch.clamp(phase_local[:, side], 0.0, phase_end)
         u_swing = torch.clamp(u_total, 0.0, 1.0)
 
@@ -392,7 +417,22 @@ def compute_stair_ik_ff_offsets_b(
 
         if extend_enabled and extend_ratio > 1e-6:
             ext_u = torch.clamp((u_total - 1.0) / extend_ratio, 0.0, 1.0)
-            release_gate = 1.0 - _smoothstep(ext_u)
+
+            # Landing hold:
+            # If this leg has landed but the opposite leg is still swinging,
+            # keep part of the swing offset instead of fully releasing to default.
+            release_start_phase = landing_release_opposite_phase - landing_release_window
+            hold_release_u = torch.clamp(
+                (opposite_phase - release_start_phase) / landing_release_window,
+                0.0,
+                1.0,
+            )
+            hold_weight = 1.0 - _smoothstep(hold_release_u)
+            hold_weight = hold_weight * opposite_active.float()
+
+            hold_floor = landing_hold_ratio * hold_weight
+            release_gate = hold_floor + (1.0 - hold_floor) * (1.0 - _smoothstep(ext_u))
+
             dq1 = dq1 * release_gate
             dq2 = dq2 * release_gate
         else:
@@ -416,7 +456,6 @@ def compute_stair_ik_ff_offsets_b(
 
         # ========== support offset for opposite leg ==========
         if support_enabled:
-            opposite_side = 1 - side
             support_thigh_name, support_calf_name = side_joint_names[opposite_side]
 
             if support_ramp_ratio > 1e-6:
@@ -424,8 +463,27 @@ def compute_stair_ik_ff_offsets_b(
             else:
                 support_gate = torch.ones_like(u_swing)
 
+            support_side_phase = torch.clamp(phase_local[:, opposite_side], 0.0, phase_end)
+            support_side_active = active[:, opposite_side]
+
+            # A leg can support only when it is not in its own swing phase.
+            # This avoids adding support offset to the second leg while it is
+            # actually being lifted.
+            support_can_help = (~support_side_active) | (support_side_phase >= 1.0)
+
+            # Ground-side support remains full strength.
+            # If the support leg has already landed on the high step, weaken it.
+            support_side_is_landed = support_side_active & (support_side_phase >= 1.0)
+            support_scale = torch.where(
+                support_side_is_landed,
+                torch.full_like(support_gate, high_step_support_scale),
+                torch.ones_like(support_gate),
+            )
+
             # When the swing leg starts release, support compensation also releases.
             support_gate = support_gate * release_gate
+            support_gate = support_gate * support_scale
+            support_gate = support_gate * support_can_help.float()
             support_gate = support_gate * side_active.float()
 
             support_q1 = support_dq1 * support_gate

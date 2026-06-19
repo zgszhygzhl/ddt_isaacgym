@@ -1471,7 +1471,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         stair_ff_followup_phase_init = 0.00
         stair_ff_cooldown = 0.20
         stair_ff_extend_enabled = True
-        stair_ff_extend_ratio = 0.30
+        stair_ff_extend_ratio = 0.85
 
         # Follow-up rescue uses looser gates than the first trigger.  This helps
         # the trailing leg lift when the leading leg has already climbed and the
@@ -1528,6 +1528,13 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
         # Default stance angles used to compute IK-based support compensation.
         stair_ff_support_default_thigh = 0.8
         stair_ff_support_default_calf = -1.5
+
+        # Landing / high-step recovery control.
+        stair_ff_landing_hold_ratio = 0.45
+        stair_ff_landing_release_opposite_phase = 0.90
+        stair_ff_landing_release_window = 0.20
+
+        stair_ff_high_step_support_scale = 0.25
 
         # Blind trigger: sustained contact plus mild blocked-motion evidence.
         # These are intentionally not too strict, because the robot has no exteroceptive
@@ -1702,7 +1709,7 @@ class D1HMoEDiscCfg(D1HMoEBaseCfg):
             # Main stair-up objective. Clearance/lift remain auxiliary; the
             # curriculum follows step_success.
             step_clearance = 1.5
-            stair_ff_tracking = 28.0
+            stair_ff_tracking = 35.0
             step_lift = 4.0
             step_pre_lift = 0.0
             step_reactive_lift = 0.0
