@@ -15,6 +15,12 @@ python scripts/train.py \
   --load_run Jun05_21-11-58_ \
   --checkpoint 4400
 
+python scripts/train.py ^
+  --task d1h_moe_disc_simple ^
+  --headless ^
+  --num_envs 4096 ^
+  --max_iterations 8000
+
 推理 录制
 python scripts/simple_play.py \
   --task=d1h_moe_base_play \

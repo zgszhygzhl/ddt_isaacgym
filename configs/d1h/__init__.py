@@ -18,3 +18,12 @@ task_registry.register("d1h_moe_prec", D1HMoEBase, D1HMoEPrecCfg(), D1HMoEPrecCf
 
 from .d1h_rec_config import *
 task_registry.register("d1h_moe_rec", D1HMoERecovery, D1HMoERecCfg(), D1HMoERecCfgPPO())
+
+from .d1h_disc_simple_config import *
+
+task_registry.register(
+    "d1h_moe_disc_simple",
+    D1HMoEDiscSimple,
+    D1HMoEDiscSimpleCfg(),
+    D1HMoEDiscSimpleCfgPPO(),
+)
